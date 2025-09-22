@@ -1,9 +1,9 @@
 #include "i2s_voice.h"
 
 #define I2S_NUM I2S_NUM_0
-#define I2S_BCK_IO (26)
-#define I2S_WS_IO (25)
-#define I2S_DO_IO (22)
+#define I2S_BCK_IO (5)
+#define I2S_WS_IO (18)
+#define I2S_DO_IO (19)
 #define TAG "AUDIO_PLAYER"
 
 static i2s_chan_handle_t tx_chan; // 使用新的 I2S 通道句柄
@@ -13,6 +13,7 @@ void i2s_init(uint32_t sample_rate, uint16_t bits, uint16_t channels)
     // 如果通道已存在，先删除
     if (tx_chan)
     {
+        i2s_channel_disable(tx_chan);
         i2s_del_channel(tx_chan);
         tx_chan = NULL;
     }
@@ -77,7 +78,6 @@ bool parse_wav_header(uint8_t *data, wav_info_t *info)
              info->sample_rate, info->bits_per_sample, info->channels);
     return true;
 }
-
 // ---------------------- HTTP 事件回调 ----------------------
 esp_err_t voice_http_event_handler(esp_http_client_event_t *evt)
 {

@@ -3,7 +3,7 @@
 #include <math.h>
 #include <stdlib.h>
 
-#define LEDC_MODE LEDC_HIGH_SPEED_MODE
+#define LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LEDC_RESOLUTION LEDC_TIMER_12_BIT
 #define LEDC_FREQ 5000
 // 转换百分比到实际 duty 值
