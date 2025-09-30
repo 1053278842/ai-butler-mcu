@@ -8,6 +8,9 @@
 #include "freertos/task.h"
 #include <string.h>
 #include <stdint.h>
+#include "esp_wn_iface.h"
+#include "esp_wn_models.h"
+#include "model_path.h"
 
 // WAV header 信息
 typedef struct
@@ -24,12 +27,14 @@ typedef struct
 } stream_ctx_t;
 
 // 初始化
-void i2s_init(uint32_t sample_rate, uint16_t bits, uint16_t channels);
-
+void i2s_spk_init(uint32_t sample_rate, uint16_t bits, uint16_t channels);
+i2s_chan_handle_t i2s_mic_init();
 // 解析wav
 bool parse_wav_header(uint8_t *data, wav_info_t *info);
 
 // http请求回调
 esp_err_t voice_http_event_handler(esp_http_client_event_t *evt);
 
+// wake word net 唤醒词任务
+void wwd_task(void *arg);
 #endif // I2S_VOICE_H

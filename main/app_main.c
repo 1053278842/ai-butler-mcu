@@ -17,6 +17,7 @@
 #include "board_light.h"
 #include "mqtt_ssl.h"
 #include "light_manager.h"
+#include "i2s_voice.h"
 
 static const char *TAG = "wifi_connect";
 
@@ -79,6 +80,10 @@ void app_main(void)
     // wifi_manager_nvs_clear(); // 测试时，清除NVS中存储的WiFi凭证
 
     board_light_init();
+
+    // 初始化麦克风、启动唤醒词任务
+    i2s_mic_init();
+    xTaskCreate(wwd_task, "wwd_task", 4096, NULL, 5, NULL);
 
     // 2. 初始化WIFI
     wifi_manager_init();

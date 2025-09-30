@@ -7,3 +7,4 @@ sdkconfig.*
 sdkconfig
 .clangd
 dependencies.lock
+/managed_components/
