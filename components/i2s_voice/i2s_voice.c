@@ -1,14 +1,14 @@
 #include "i2s_voice.h"
 
 #define I2S_NUM I2S_NUM_0
-#define I2S_BCK_IO (2)
-#define I2S_WS_IO (3)
-#define I2S_DO_IO (5)
-#define I2S_DI_IO (18)
+#define I2S_BCK_IO (16)
+#define I2S_WS_IO (17)
+#define I2S_DO_IO (18)
+#define I2S_DI_IO (20)
 #define TAG "AUDIO_PLAYER"
 
 #define SAMPLE_RATE 16000
-#define I2S_BUF_LEN 1024
+#define I2S_BUF_LEN 512
 #define WWN_MODLE "hiesp"
 #define VAD_THRESHOLD 5000
 
@@ -81,7 +81,7 @@ i2s_chan_handle_t i2s_mic_init()
     }
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    i2s_new_channel(&chan_cfg, &mic_chan, NULL);
+    i2s_new_channel(&chan_cfg, NULL, &mic_chan);
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
@@ -135,7 +135,7 @@ void wake_callbak()
         }
         int energy = sum / (bytes_read / 2);
         static int dbg_cnt = 0;
-        if ((dbg_cnt++ & 15) == 0)
+        if ((dbg_cnt++ & 300) == 0)
         {
             ESP_LOGI(TAG, "energy=%u, rec_len=%zu", energy, record_len);
         }
@@ -169,31 +169,65 @@ void wake_callbak()
     free(record_buf);
     ESP_LOGI(TAG, "录音结束");
 }
-
-void wwd_task(void *arg)
+void wwd_task()
 {
+    ESP_LOGI(TAG, "唤醒词任务启动，栈剩余: %d", uxTaskGetStackHighWaterMark(NULL));
+
+    // 先检查可用内存
+    ESP_LOGI(TAG, "可用内存: %d", esp_get_free_heap_size());
+
     srmodel_list_t *models = esp_srmodel_init("model");
+    if (!models)
+    {
+        ESP_LOGE(TAG, "模型初始化失败!");
+        vTaskDelete(NULL);
+    }
+
+    ESP_LOGI(TAG, "模型加载后内存: %d", esp_get_free_heap_size());
     char *model_name = esp_srmodel_filter(models, ESP_WN_PREFIX, WWN_MODLE);
     esp_wn_iface_t *wakenet = (esp_wn_iface_t *)esp_wn_handle_from_name(model_name);
     model_iface_data_t *wn_data = wakenet->create(model_name, DET_MODE_95);
 
     int16_t buf[I2S_BUF_LEN];
+    int stack_check_counter = 0;
 
     while (1)
     {
+        // 定期检查栈使用情况
+        if (stack_check_counter++ % 100 == 0)
+        {
+            UBaseType_t stack_remaining = uxTaskGetStackHighWaterMark(NULL);
+            if (stack_remaining < 512)
+            {
+                ESP_LOGI(TAG, "唤醒词任务栈剩余: %d", stack_remaining);
+                ESP_LOGE(TAG, "栈空间不足!");
+            }
+        }
+
         size_t bytes_read = 0;
-        // 句柄、缓存区、缓存区大小、缓存实际大小
         i2s_channel_read(mic_chan, buf, sizeof(buf), &bytes_read, portMAX_DELAY);
 
         if (wakenet->detect(wn_data, buf))
         {
             ESP_LOGI(TAG, "唤醒成功!");
-            stop_play_flag = true; // 停止播放
-            wake_callbak();        // 录音
+            stop_play_flag = true;
+            wake_callbak();
         }
+
+        vTaskDelay(pdMS_TO_TICKS(1)); // 添加小延迟避免过度占用CPU
     }
 }
 
+// 或者在切换前完全关闭扬声器
+void i2s_spk_deinit()
+{
+    if (spk_chan)
+    {
+        i2s_channel_disable(spk_chan);
+        i2s_del_channel(spk_chan);
+        spk_chan = NULL;
+    }
+}
 // ---------------------- 解析 WAV header ----------------------
 bool parse_wav_header(uint8_t *data, wav_info_t *info)
 {
@@ -269,6 +303,12 @@ esp_err_t voice_http_event_handler(esp_http_client_event_t *evt)
     case HTTP_EVENT_DISCONNECTED:
         ctx->header_parsed = false;
         ESP_LOGI(TAG, "HTTP disconnected");
+
+        // 先静音或关闭扬声器
+        i2s_spk_deinit();
+
+        // 添加短暂延迟，让噪声衰减
+        vTaskDelay(pdMS_TO_TICKS(50));
         // 播放结束，切回麦克风通道
         i2s_mic_init();
         break;

@@ -11,7 +11,7 @@
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
 #include "model_path.h"
-
+#include <stdbool.h>
 // WAV header 信息
 typedef struct
 {
@@ -36,5 +36,5 @@ bool parse_wav_header(uint8_t *data, wav_info_t *info);
 esp_err_t voice_http_event_handler(esp_http_client_event_t *evt);
 
 // wake word net 唤醒词任务
-void wwd_task(void *arg);
+void wwd_task();
 #endif // I2S_VOICE_H
