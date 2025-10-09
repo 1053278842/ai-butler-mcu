@@ -3,8 +3,9 @@
 build
 components/mqtt_ssl/mqtt_ssl_config.h
 components/mqtt_ssl/ca.crt
-# sdkconfig.*
-# sdkconfig
+sdkconfig.ci
+sdkconfig.old
+sdkconfig
 .clangd
 dependencies.lock
 /managed_components/
