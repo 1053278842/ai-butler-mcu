@@ -42,7 +42,7 @@ void handle_player(const char *payload)
     {
         ESP_LOGI(MQTT_SSL_TAG, "开始播放 URL: %s", url_json->valuestring);
         // 用独立任务播放，避免阻塞 MQTT
-        xTaskCreate(stream_task, "audio_stream_task", 8192, (void *)url_json->valuestring, 5, NULL);
+        // xTaskCreate(stream_task, "audio_stream_task", 8192, (void *)url_json->valuestring, 5, NULL);
     }
 
     // 释放内存

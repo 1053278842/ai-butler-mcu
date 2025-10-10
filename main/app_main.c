@@ -77,45 +77,44 @@ void app_main(void)
 {
 
     // 1. 初始化 NVS
-    // wifi_manager_nvs_init();
+    wifi_manager_nvs_init();
     // wifi_manager_nvs_clear(); // 测试时，清除NVS中存储的WiFi凭证
 
-    // board_light_init();
+    board_light_init();
 
     // 初始化麦克风、启动唤醒词任务
     i2s_mic_init();
-    wwd_task();
-    // xTaskCreate(wwd_task, "wwd_task", 10 * 1024, NULL, 5, NULL);
+    xTaskCreate(wwd_task, "wwd_task", 10 * 1024, NULL, 5, NULL);
 
     // 2. 初始化WIFI
-    // wifi_manager_init();
+    wifi_manager_init();
 
-    // if (wifi_manager_nvs_get(&info) == ESP_OK)
-    // {
-    //     ESP_LOGI(TAG, "NVS中获取WiFi凭证: SSID=%s, 密码=%s", info.ssid, info.password);
-    // }
-    // else
-    // {
-    //     ESP_LOGI(TAG, "NVS中没有WiFi凭证");
-    // };
+    if (wifi_manager_nvs_get(&info) == ESP_OK)
+    {
+        ESP_LOGI(TAG, "NVS中获取WiFi凭证: SSID=%s, 密码=%s", info.ssid, info.password);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "NVS中没有WiFi凭证");
+    };
 
-    // ESP_ERROR_CHECK(esp_event_handler_register(
-    //     HTTP_RECIVE_EVENT,
-    //     ESP_EVENT_ANY_ID,
-    //     &event_handler,
-    //     NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        HTTP_RECIVE_EVENT,
+        ESP_EVENT_ANY_ID,
+        &event_handler,
+        NULL));
 
-    // ESP_ERROR_CHECK(esp_event_handler_register(
-    //     WIFI_MANAGER_EVENT,
-    //     ESP_EVENT_ANY_ID,
-    //     &event_handler,
-    //     NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_MANAGER_EVENT,
+        ESP_EVENT_ANY_ID,
+        &event_handler,
+        NULL));
 
-    // // 3. 启动 WiFi 和 Web 服务器
-    // wifi_manager_start_apsta(info.ssid, info.password);
-    // // ESP_LOGI(TAG, "WiFi 配网完成，进入主程序逻辑");
-    // while (1)
-    // {
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
-    // }
+    // 3. 启动 WiFi 和 Web 服务器
+    wifi_manager_start_apsta(info.ssid, info.password);
+    // ESP_LOGI(TAG, "WiFi 配网完成，进入主程序逻辑");
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }

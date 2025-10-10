@@ -12,6 +12,9 @@
 #include "esp_wn_models.h"
 #include "model_path.h"
 #include <stdbool.h>
+#include <math.h>
+#include "esp_timer.h"
+
 // WAV header 信息
 typedef struct
 {
@@ -25,6 +28,11 @@ typedef struct
     wav_info_t wav_info;
     bool header_parsed;
 } stream_ctx_t;
+typedef struct
+{
+    uint8_t *data;
+    size_t length;
+} wav_mem_t;
 
 // 初始化
 void i2s_spk_init(uint32_t sample_rate, uint16_t bits, uint16_t channels);
