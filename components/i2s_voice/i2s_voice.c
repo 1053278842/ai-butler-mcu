@@ -1,10 +1,5 @@
 #include "i2s_voice.h"
 
-#include "socket.h"
-#include "lwip/inet.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
-
 #define I2S_NUM I2S_NUM_0
 #define I2S_BCK_IO (16)
 #define I2S_WS_IO (17)
@@ -133,8 +128,11 @@ i2s_chan_handle_t i2s_mic_init()
         },
     };
     std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT; // 修改为左声道
+    std_cfg.slot_cfg.bit_order_lsb = false;         // 大端模式,高位在前，低位补零。默认值(如果是true则高位补零，补码需要处理)
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    // chan_cfg.dma_frame_num = 1024;
+
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &mic_chan));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(mic_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(mic_chan));
@@ -437,14 +435,15 @@ void process_sample(int32_t raw)
 
 void wake_callbak()
 {
-#define EXAMPLE_BUFF_SIZE 2 * 1024 // 接收BUFF
+#define EXAMPLE_BUFF_SIZE 1 * 1024 // 接收BUFF
     ESP_LOGI(TAG, "开始录音...");
     i2s_mic_init();
 
     // 初始化UDP主机地址参数
     int soock = -1;
     struct sockaddr_in client_addr;
-    client_addr.sin_addr.s_addr = inet_addr("192.168.88.250");
+    // client_addr.sin_addr.s_addr = inet_addr("192.168.88.250");
+    client_addr.sin_addr.s_addr = inet_addr("192.168.100.6");
     client_addr.sin_family = AF_INET;
     client_addr.sin_port = htons(7456);
 
@@ -461,23 +460,36 @@ void wake_callbak()
     size_t r_bytes = 0;
 
     // udp_do_init();
-    uint16_t cnt = 0;
+    // uint16_t cnt = 0;
     while (1)
     {
         if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
         {
             // r_buf 是 uint8_t*，这里要按 32 位整型解析
             int32_t *samples = (int32_t *)r_buf;
+            // 2048/32 = 512 个样本，每个样子占用4字节，其中只有24位有效
             int sample_count = r_bytes / sizeof(int32_t);
 
-            int64_t sum = 0;
+            // int64_t sum = 0;
+            // for (int i = 0; i < sample_count; i++)
+            // {
+            //     sum += llabs(samples[i]); // 用 llabs 防止溢出
+            // }
+
+            // int64_t avg = sum / sample_count;
+            // ESP_LOGI(TAG, "Average amplitude: %lld", avg);
+
+            const float gain = 4.0f; // 📢 调节这个倍数来放大音量，建议 8~16
+            // 🎚️ 软件放大处理
             for (int i = 0; i < sample_count; i++)
             {
-                sum += llabs(samples[i]); // 用 llabs 防止溢出
+                int64_t v = (int64_t)(samples[i] * gain);
+                if (v > INT32_MAX)
+                    v = INT32_MAX;
+                else if (v < INT32_MIN)
+                    v = INT32_MIN;
+                samples[i] = (int32_t)v;
             }
-
-            int64_t avg = sum / sample_count;
-            ESP_LOGI(TAG, "Average amplitude: %lld", avg);
 
             esp_err_t ret = sendto(soock, (uint8_t *)r_buf, r_bytes, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
             if (ret < 0)

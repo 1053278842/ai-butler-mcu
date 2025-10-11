@@ -15,6 +15,14 @@
 #include <math.h>
 #include "esp_timer.h"
 
+#include "driver/i2s.h"
+#include "driver/i2s_common.h"
+
+#include "socket.h"
+#include "lwip/inet.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
+
 // WAV header 信息
 typedef struct
 {
