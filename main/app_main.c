@@ -81,13 +81,11 @@ void app_main(void)
     // wifi_manager_nvs_clear(); // 测试时，清除NVS中存储的WiFi凭证
 
     board_light_init();
-
+    // 2. 初始化WIFI
+    wifi_manager_init();
     // 初始化麦克风、启动唤醒词任务
     i2s_mic_init();
     xTaskCreate(wwd_task, "wwd_task", 10 * 1024, NULL, 5, NULL);
-
-    // 2. 初始化WIFI
-    wifi_manager_init();
 
     if (wifi_manager_nvs_get(&info) == ESP_OK)
     {

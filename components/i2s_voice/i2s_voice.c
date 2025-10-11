@@ -1,5 +1,10 @@
 #include "i2s_voice.h"
 
+#include "socket.h"
+#include "lwip/inet.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
+
 #define I2S_NUM I2S_NUM_0
 #define I2S_BCK_IO (16)
 #define I2S_WS_IO (17)
@@ -16,6 +21,12 @@
 #define SILENCE_THRESHOLD 0.65f // 声音阈值，降低以提高灵敏度
 #define BIT_DEPTH 24
 
+#define CONFIG_EXAMPLE_BIT_SAMPLE 32
+#define CONFIG_EXAMPLE_SAMPLE_RATE 44100
+#define NUM_CHANNELS (1) // For mono recording only!
+#define SAMPLE_SIZE (CONFIG_EXAMPLE_BIT_SAMPLE * 32)
+#define BYTE_RATE (CONFIG_EXAMPLE_SAMPLE_RATE * (CONFIG_EXAMPLE_BIT_SAMPLE / 8)) * NUM_CHANNELS
+
 static int64_t last_loud_time = 0;
 static float *audio_buffer = NULL;
 static size_t buffer_pos = 0;
@@ -23,6 +34,7 @@ static int active = 0;
 static int silence_samples = 0;
 static int64_t recording_start_time = 0; // 录音开始时间
 static bool recording_enabled = true;    // 录音使能标志
+int32_t r_buf[SAMPLE_SIZE + 32];
 
 static i2s_chan_handle_t spk_chan = NULL; // 使用新的 I2S 通道句柄
 static i2s_chan_handle_t mic_chan = NULL; // 使用新的 I2S 通道句柄
@@ -92,18 +104,20 @@ i2s_chan_handle_t i2s_mic_init()
         mic_chan = NULL;
     }
 
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan_cfg.dma_frame_num = 1024;
-    i2s_new_channel(&chan_cfg, NULL, &mic_chan);
+    // i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    // chan_cfg.dma_frame_num = 1024;
+    // i2s_new_channel(&chan_cfg, NULL, &mic_chan);
 
     // 初始化或更新声道和时钟配置
     i2s_std_config_t std_cfg = {
-        .clk_cfg = {
-            .clk_src = I2C_CLK_SRC_DEFAULT, // 默认时钟
-            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
-            .sample_rate_hz = SAMPLE_RATE // 44.1k采集率
-        },
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_24BIT, I2S_SLOT_MODE_MONO),
+        .clk_cfg =
+            {
+                .clk_src = I2S_CLK_SRC_DEFAULT,
+                .ext_clk_freq_hz = 0,
+                .mclk_multiple = I2S_MCLK_MULTIPLE_512,
+                .sample_rate_hz = 44100,
+            },
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED, // 不需要
             .dout = I2S_GPIO_UNUSED, // 不需要
@@ -119,11 +133,12 @@ i2s_chan_handle_t i2s_mic_init()
         },
     };
     std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT; // 修改为左声道
-    std_cfg.slot_cfg.bit_order_lsb = true;          // 低位先行,这边我不确定,但采集的数据确实受环境声音的改变而改变,高位先行却没有
-    /* 初始化通道 */
-    i2s_channel_init_std_mode(mic_chan, &std_cfg);
-    /* 在读取数据之前，先启动 RX 通道 */
-    i2s_channel_enable(mic_chan);
+
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &mic_chan));
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(mic_chan, &std_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(mic_chan));
+
     return mic_chan;
 }
 
@@ -422,48 +437,61 @@ void process_sample(int32_t raw)
 
 void wake_callbak()
 {
+#define EXAMPLE_BUFF_SIZE 2 * 1024 // 接收BUFF
     ESP_LOGI(TAG, "开始录音...");
-
-    // 重新启用录音
-    recording_enabled = true;
-    buffer_pos = 0;
-    active = 0;
-    silence_samples = 0;
-    recording_start_time = 0;
-
     i2s_mic_init();
 
-    uint8_t raw_buffer[I2S_BUF_LEN * 3]; // 24位数据缓冲区
-    int16_t audio_buf[I2S_BUF_LEN];
-    uint8_t *read_data_buff = (uint8_t *)malloc(sizeof(uint8_t) * 3 * I2S_BUF_LEN);
-    size_t len = 0;
+    // 初始化UDP主机地址参数
+    int soock = -1;
+    struct sockaddr_in client_addr;
+    client_addr.sin_addr.s_addr = inet_addr("192.168.88.250");
+    client_addr.sin_family = AF_INET;
+    client_addr.sin_port = htons(7456);
 
-    int16_t *record_buf = NULL;
-    size_t record_samples = 0; // 改为样本计数，不是字节计数
-    int silent_samples = 0;
-
-    const int vad_threshold = VAD_THRESHOLD;
-    const int silence_limit = SAMPLE_RATE * 3;
-    init_audio_buffer();
-    while (recording_enabled) // 修改循环条件
+    // 创建UDP套接字
+    soock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (soock < 0)
     {
-        size_t bytes_read = 0;
-        i2s_channel_read(mic_chan, read_data_buff, I2S_BUF_LEN * 3, &len, portMAX_DELAY);
-        for (uint16_t i = 0; i < len; i += 3)
+        ESP_LOGE("UDP_CLIENT", "UDP_CLIENT套接字创建失败！\r\n");
+    }
+    ESP_LOGI("UDP_CLIENT", "UDP_CLIENT套接字创建成功！\r\n");
+
+    uint8_t *r_buf = (uint8_t *)calloc(1, EXAMPLE_BUFF_SIZE);
+    assert(r_buf); // Check if r_buf allocation success
+    size_t r_bytes = 0;
+
+    // udp_do_init();
+    uint16_t cnt = 0;
+    while (1)
+    {
+        if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
         {
-            // 简化的24位数据读取 - 回到原始方式
-            int32_t real_data = (read_data_buff[i] << 16) | (read_data_buff[i + 1] << 8) | (read_data_buff[i + 2]);
+            // r_buf 是 uint8_t*，这里要按 32 位整型解析
+            int32_t *samples = (int32_t *)r_buf;
+            int sample_count = r_bytes / sizeof(int32_t);
 
-            // 简单的符号位处理
-            if (real_data & 0x00800000)
-                real_data |= 0xFF000000;
+            int64_t sum = 0;
+            for (int i = 0; i < sample_count; i++)
+            {
+                sum += llabs(samples[i]); // 用 llabs 防止溢出
+            }
 
-            process_sample(real_data);
+            int64_t avg = sum / sample_count;
+            ESP_LOGI(TAG, "Average amplitude: %lld", avg);
+
+            esp_err_t ret = sendto(soock, (uint8_t *)r_buf, r_bytes, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
+            if (ret < 0)
+            {
+                ESP_LOGE(TAG, "UDP发送失败!, %d", ret);
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Read Task: i2s read failed\n");
         }
     }
-
-    ESP_LOGI(TAG, "录音循环已退出");
-    free(read_data_buff); // 释放内存
+    free(r_buf);
+    vTaskDelete(NULL);
 }
 
 void wwd_task()
