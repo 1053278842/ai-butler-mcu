@@ -84,8 +84,9 @@ void app_main(void)
     // 2. 初始化WIFI
     wifi_manager_init();
     // 初始化麦克风、启动唤醒词任务
-    i2s_mic_init();
-    xTaskCreate(wwd_task, "wwd_task", 10 * 1024, NULL, 5, NULL);
+    // i2s_mic_init();
+    // xTaskCreate(wwd_task, "wwd_task", 10 * 1024, NULL, 5, NULL);
+    xTaskCreate(wwd_task, "wwd_task", 8192, NULL, 5, NULL);
 
     if (wifi_manager_nvs_get(&info) == ESP_OK)
     {

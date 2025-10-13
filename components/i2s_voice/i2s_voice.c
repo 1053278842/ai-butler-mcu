@@ -11,8 +11,9 @@
 #define I2S_BUF_LEN 64
 #define WWN_MODLE "hiesp"
 #define VAD_THRESHOLD 5000
+#define EXAMPLE_BUFF_SIZE 1 * 1024 // 接收BUFF
 
-#define MAX_RECORD_SEC 5
+#define MAX_RECORD_SEC 10
 #define SILENCE_THRESHOLD 0.65f // 声音阈值，降低以提高灵敏度
 #define BIT_DEPTH 24
 
@@ -21,6 +22,9 @@
 #define NUM_CHANNELS (1) // For mono recording only!
 #define SAMPLE_SIZE (CONFIG_EXAMPLE_BIT_SAMPLE * 32)
 #define BYTE_RATE (CONFIG_EXAMPLE_SAMPLE_RATE * (CONFIG_EXAMPLE_BIT_SAMPLE / 8)) * NUM_CHANNELS
+
+int32_t *ad_buffer = NULL;
+int16_t *ad_buffer_16 = NULL;
 
 static int64_t last_loud_time = 0;
 static float *audio_buffer = NULL;
@@ -110,7 +114,7 @@ i2s_chan_handle_t i2s_mic_init()
                 .clk_src = I2S_CLK_SRC_DEFAULT,
                 .ext_clk_freq_hz = 0,
                 .mclk_multiple = I2S_MCLK_MULTIPLE_512,
-                .sample_rate_hz = 44100,
+                .sample_rate_hz = SAMPLE_RATE,
             },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
@@ -131,7 +135,7 @@ i2s_chan_handle_t i2s_mic_init()
     std_cfg.slot_cfg.bit_order_lsb = false;         // 大端模式,高位在前，低位补零。默认值(如果是true则高位补零，补码需要处理)
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    // chan_cfg.dma_frame_num = 1024;
+    // chan_cfg.dma_frame_num = 4 * 1024;
 
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &mic_chan));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(mic_chan, &std_cfg));
@@ -139,45 +143,49 @@ i2s_chan_handle_t i2s_mic_init()
 
     return mic_chan;
 }
-
-wav_mem_t create_wav_in_memory(const int16_t *pcm_data, size_t samples, int sample_rate)
+/**
+ * 创建 WAV 文件（支持 16位 / 32位 深度）
+ * @param buf      音频数据指针（int16_t* 或 int32_t*）
+ * @param samples  样本数量
+ * @param sample_rate  采样率
+ * @param bits_per_sample  每样本位深（16 或 32）
+ */
+static wav_mem_t create_wav_in_memory(const void *buf, size_t samples, int sample_rate, int bits_per_sample)
 {
-    const int num_channels = 1;
-    const int bits_per_sample = 16;
-    const int byte_rate = sample_rate * num_channels * bits_per_sample / 8;
-    const int block_align = num_channels * bits_per_sample / 8;
-    const int data_size = samples * block_align;
-    const int total_size = 44 + data_size;
+    wav_mem_t wav = {0};
 
-    uint8_t *wav = malloc(total_size);
-    if (!wav)
-    {
-        wav_mem_t empty = {NULL, 0};
-        return empty;
-    }
+    if (!buf || samples == 0 || (bits_per_sample != 16 && bits_per_sample != 32))
+        return wav;
 
-    // === 填写 WAV Header ===
-    memcpy(wav + 0, "RIFF", 4);
-    *(uint32_t *)(wav + 4) = total_size - 8; // 文件大小-8字节
-    memcpy(wav + 8, "WAVE", 4);
-    memcpy(wav + 12, "fmt ", 4);
-    *(uint32_t *)(wav + 16) = 16; // fmt 块大小
-    *(uint16_t *)(wav + 20) = 1;  // PCM 格式
-    *(uint16_t *)(wav + 22) = num_channels;
-    *(uint32_t *)(wav + 24) = sample_rate;
-    *(uint32_t *)(wav + 28) = byte_rate;
-    *(uint16_t *)(wav + 32) = block_align;
-    *(uint16_t *)(wav + 34) = bits_per_sample;
-    memcpy(wav + 36, "data", 4);
-    *(uint32_t *)(wav + 40) = data_size;
+    const uint8_t *pcm_data = (const uint8_t *)buf;
+    uint32_t bytes_per_sample = bits_per_sample / 8;
+    uint32_t data_size = samples * bytes_per_sample;
 
-    // === 拷贝音频数据 ===
-    memcpy(wav + 44, pcm_data, data_size);
+    wav_header_t header;
+    memcpy(header.riff_id, "RIFF", 4);
+    memcpy(header.wave_id, "WAVE", 4);
+    memcpy(header.fmt_id, "fmt ", 4);
+    memcpy(header.data_id, "data", 4);
 
-    wav_mem_t result = {
-        .data = wav,
-        .length = total_size};
-    return result;
+    header.fmt_size = 16;
+    header.audio_format = 1; // PCM
+    header.num_channels = 1;
+    header.sample_rate = sample_rate;
+    header.bits_per_sample = bits_per_sample;
+    header.block_align = header.num_channels * bytes_per_sample;
+    header.byte_rate = header.sample_rate * header.block_align;
+    header.data_size = data_size;
+    header.riff_size = 36 + data_size;
+
+    wav.length = sizeof(wav_header_t) + data_size;
+    wav.data = malloc(wav.length);
+    if (!wav.data)
+        return wav;
+
+    memcpy(wav.data, &header, sizeof(wav_header_t));
+    memcpy(wav.data + sizeof(wav_header_t), pcm_data, data_size);
+
+    return wav;
 }
 
 void upload_wav_memory(const char *url, const uint8_t *data, size_t length)
@@ -202,9 +210,9 @@ void upload_wav_memory(const char *url, const uint8_t *data, size_t length)
     char start[256];
     int start_len = snprintf(start, sizeof(start),
                              "--%s\r\n"
-                             "Content-Disposition: form-data; name=\"file\"; filename=\"voice_%ld.wav\"\r\n"
+                             "Content-Disposition: form-data; name=\"file\"; filename=\"voice.wav\"\r\n"
                              "Content-Type: audio/wav\r\n\r\n",
-                             boundary, (long)esp_log_timestamp());
+                             boundary);
 
     const char *end_fmt = "\r\n--%s--\r\n";
     char end[64];
@@ -242,9 +250,9 @@ void upload_wav_memory(const char *url, const uint8_t *data, size_t length)
     esp_http_client_cleanup(client);
 }
 
-void send_audio_to_server(int16_t *buf, size_t len)
+void send_audio_to_server(const void *buf, size_t samples, int bits_per_sample)
 {
-    wav_mem_t wav = create_wav_in_memory(buf, len, SAMPLE_RATE);
+    wav_mem_t wav = create_wav_in_memory(buf, samples, SAMPLE_RATE, bits_per_sample);
     if (wav.data)
     {
         ESP_LOGI(TAG, "WAV内存数据大小: %zu bytes", wav.length);
@@ -296,205 +304,195 @@ static void float_to_int16(const float *in, int16_t *out, size_t samples)
 // 处理采样
 void process_sample(int32_t raw)
 {
-    // 检查录音是否使能
-    if (!recording_enabled)
-    {
-        return;
-    }
+    // // 检查录音是否使能
+    // if (!recording_enabled)
+    // {
+    //     return;
+    // }
 
-    // 简化的24bit转float
-    float norm = (float)raw / 8388608.0f;
+    // // 简化的24bit转float
+    // float norm = (float)raw / 8388608.0f;
 
-    // 调试信息：每1000个样本检查一次数据范围
-    if (buffer_pos % 1000 == 0)
-    {
-        ESP_LOGI(TAG, "样本%d: 原始=0x%08X (%d), 归一化=%.6f", buffer_pos, raw, raw, norm);
-    }
+    // // 调试信息：每1000个样本检查一次数据范围
+    // if (buffer_pos % 1000 == 0)
+    // {
+    //     ESP_LOGI(TAG, "样本%d: 原始=0x%08X (%d), 归一化=%.6f", buffer_pos, raw, raw, norm);
+    // }
 
-    // 临时：打印前100个样本的详细信息用于调试
-    if (buffer_pos < 100)
-    {
-        ESP_LOGI(TAG, "调试样本%d: 原始=0x%08X (%d), 归一化=%.6f", buffer_pos, raw, raw, norm);
-    }
+    // // 临时：打印前100个样本的详细信息用于调试
+    // if (buffer_pos < 100)
+    // {
+    //     ESP_LOGI(TAG, "调试样本%d: 原始=0x%08X (%d), 归一化=%.6f", buffer_pos, raw, raw, norm);
+    // }
 
-    // 保存数据 - 修复缓冲区溢出问题
-    if (buffer_pos < SAMPLE_RATE * MAX_RECORD_SEC)
-    {
-        audio_buffer[buffer_pos] = norm;
-        buffer_pos++;
-    }
-    else
-    {
-        ESP_LOGW(TAG, "音频缓冲区已满，停止录音！当前样本数: %d", buffer_pos);
-        // 缓冲区满了，直接结束录音并上传
-        ESP_LOGI(TAG, "缓冲区满，强制结束录音，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
+    // // 保存数据 - 修复缓冲区溢出问题
+    // if (buffer_pos < SAMPLE_RATE * MAX_RECORD_SEC)
+    // {
+    //     audio_buffer[buffer_pos] = norm;
+    //     buffer_pos++;
+    // }
+    // else
+    // {
+    //     ESP_LOGW(TAG, "音频缓冲区已满，停止录音！当前样本数: %d", buffer_pos);
+    //     // 缓冲区满了，直接结束录音并上传
+    //     ESP_LOGI(TAG, "缓冲区满，强制结束录音，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
 
-        if (buffer_pos > 0)
-        {
-            // 分配 int16_t 缓冲并把 float -> int16
-            int16_t *pcm16 = malloc(buffer_pos * sizeof(int16_t));
-            if (!pcm16)
-            {
-                ESP_LOGE(TAG, "无法分配 pcm16 缓冲 (%zu bytes)", buffer_pos * sizeof(int16_t));
-            }
-            else
-            {
-                float_to_int16(audio_buffer, pcm16, buffer_pos);
+    //     if (buffer_pos > 0)
+    //     {
+    //         // 分配 int16_t 缓冲并把 float -> int16
+    //         int16_t *pcm16 = malloc(buffer_pos * sizeof(int16_t));
+    //         if (!pcm16)
+    //         {
+    //             ESP_LOGE(TAG, "无法分配 pcm16 缓冲 (%zu bytes)", buffer_pos * sizeof(int16_t));
+    //         }
+    //         else
+    //         {
+    //             float_to_int16(audio_buffer, pcm16, buffer_pos);
 
-                // 发送给服务器（内部会生成 wav 并上传）
-                send_audio_to_server(pcm16, buffer_pos);
+    //             // 发送给服务器（内部会生成 wav 并上传）
+    //             send_audio_to_server(pcm16, buffer_pos);
 
-                free(pcm16);
-            }
-        }
+    //             free(pcm16);
+    //         }
+    //     }
 
-        // 清空录音缓冲，准备下一次
-        buffer_pos = 0;
-        active = 0;
-        silence_samples = 0;
-        recording_start_time = 0; // 重置录音开始时间
+    //     // 清空录音缓冲，准备下一次
+    //     buffer_pos = 0;
+    //     active = 0;
+    //     silence_samples = 0;
+    //     recording_start_time = 0; // 重置录音开始时间
 
-        // 暂时禁用录音，避免死循环
-        recording_enabled = false;
-        ESP_LOGI(TAG, "录音已禁用，等待重新启动");
+    //     // 暂时禁用录音，避免死循环
+    //     recording_enabled = false;
+    //     ESP_LOGI(TAG, "录音已禁用，等待重新启动");
 
-        return; // 缓冲区满了，停止处理
-    }
+    //     return; // 缓冲区满了，停止处理
+    // }
 
-    int64_t now = esp_timer_get_time(); // 获取当前时间 (微秒)
-    // 检测声音
-    if (fabsf(norm) > SILENCE_THRESHOLD)
-    {
-        if (!active) // 第一次检测到声音
-        {
-            ESP_LOGI(TAG, "开始检测到声音, 样本数: %d, 音频值：%.6f", buffer_pos, fabsf(norm));
-        }
-        active = 1;
-        last_loud_time = now; // 有声音时更新时间戳
-    }
-    else if (buffer_pos % 1000 == 0) // 每1000个样本打印一次调试信息
-    {
-        ESP_LOGI(TAG, "样本数: %d, 当前音频值: %.6f, 阈值: %.6f, active: %d", buffer_pos, fabsf(norm), SILENCE_THRESHOLD, active);
-    }
+    // int64_t now = esp_timer_get_time(); // 获取当前时间 (微秒)
+    // // 检测声音
+    // if (fabsf(norm) > SILENCE_THRESHOLD)
+    // {
+    //     if (!active) // 第一次检测到声音
+    //     {
+    //         ESP_LOGI(TAG, "开始检测到声音, 样本数: %d, 音频值：%.6f", buffer_pos, fabsf(norm));
+    //     }
+    //     active = 1;
+    //     last_loud_time = now; // 有声音时更新时间戳
+    // }
+    // else if (buffer_pos % 1000 == 0) // 每1000个样本打印一次调试信息
+    // {
+    //     ESP_LOGI(TAG, "样本数: %d, 当前音频值: %.6f, 阈值: %.6f, active: %d", buffer_pos, fabsf(norm), SILENCE_THRESHOLD, active);
+    // }
 
-    // 初始化录音开始时间
-    if (buffer_pos == 1 && recording_start_time == 0)
-    {
-        recording_start_time = now;
-        ESP_LOGI(TAG, "开始录音，时间戳: %lld", recording_start_time);
-    }
+    // // 初始化录音开始时间
+    // if (buffer_pos == 1 && recording_start_time == 0)
+    // {
+    //     recording_start_time = now;
+    //     ESP_LOGI(TAG, "开始录音，时间戳: %lld", recording_start_time);
+    // }
 
-    // 修改逻辑：录音至少持续2秒，然后检测静音
-    if (active || (now - recording_start_time) < 2 * 1000000) // 录音至少2秒
-    {
-        // 检查是否超过3秒静音（只有在录音超过2秒后才检查）
-        if (active && (now - last_loud_time) > 3 * 1000000) // 超过3秒没声音
-        {
-            ESP_LOGI(TAG, "静音超过3秒，录音结束，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
+    // // 修改逻辑：录音至少持续2秒，然后检测静音
+    // if (active || (now - recording_start_time) < 2 * 1000000) // 录音至少2秒
+    // {
+    //     // 检查是否超过3秒静音（只有在录音超过2秒后才检查）
+    //     if (active && (now - last_loud_time) > 3 * 1000000) // 超过3秒没声音
+    //     {
+    //         ESP_LOGI(TAG, "静音超过3秒，录音结束，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
 
-            // 检查是否有足够的录音数据（至少1秒）
-            if (buffer_pos < SAMPLE_RATE * 1) // 至少1秒的录音
-            {
-                ESP_LOGW(TAG, "录音时长太短（%.2f秒），丢弃录音数据", buffer_pos / (float)SAMPLE_RATE);
-                buffer_pos = 0;
-                active = 0;
-                silence_samples = 0;
-                return;
-            }
+    //         // 检查是否有足够的录音数据（至少1秒）
+    //         if (buffer_pos < SAMPLE_RATE * 1) // 至少1秒的录音
+    //         {
+    //             ESP_LOGW(TAG, "录音时长太短（%.2f秒），丢弃录音数据", buffer_pos / (float)SAMPLE_RATE);
+    //             buffer_pos = 0;
+    //             active = 0;
+    //             silence_samples = 0;
+    //             return;
+    //         }
 
-            if (buffer_pos > 0)
-            {
-                // 分配 int16_t 缓冲并把 float -> int16
-                int16_t *pcm16 = malloc(buffer_pos * sizeof(int16_t));
-                if (!pcm16)
-                {
-                    ESP_LOGE(TAG, "无法分配 pcm16 缓冲 (%zu bytes)", buffer_pos * sizeof(int16_t));
-                }
-                else
-                {
-                    float_to_int16(audio_buffer, pcm16, buffer_pos);
+    //         if (buffer_pos > 0)
+    //         {
+    //             // 分配 int16_t 缓冲并把 float -> int16
+    //             int16_t *pcm16 = malloc(buffer_pos * sizeof(int16_t));
+    //             if (!pcm16)
+    //             {
+    //                 ESP_LOGE(TAG, "无法分配 pcm16 缓冲 (%zu bytes)", buffer_pos * sizeof(int16_t));
+    //             }
+    //             else
+    //             {
+    //                 float_to_int16(audio_buffer, pcm16, buffer_pos);
 
-                    // 发送给服务器（内部会生成 wav 并上传）
-                    send_audio_to_server(pcm16, buffer_pos);
+    //                 // 发送给服务器（内部会生成 wav 并上传）
+    //                 send_audio_to_server(pcm16, buffer_pos);
 
-                    free(pcm16);
-                }
-            }
-            // 清空录音缓冲，准备下一次
-            buffer_pos = 0;
-            active = 0;
-            silence_samples = 0;
-            recording_start_time = 0; // 重置录音开始时间
+    //                 free(pcm16);
+    //             }
+    //         }
+    //         // 清空录音缓冲，准备下一次
+    //         buffer_pos = 0;
+    //         active = 0;
+    //         silence_samples = 0;
+    //         recording_start_time = 0; // 重置录音开始时间
 
-            // 禁用录音，等待重新启动
-            recording_enabled = false;
-            ESP_LOGI(TAG, "录音已完成，已禁用等待重新启动");
-        }
-    }
+    //         // 禁用录音，等待重新启动
+    //         recording_enabled = false;
+    //         ESP_LOGI(TAG, "录音已完成，已禁用等待重新启动");
+    //     }
+    // }
 }
 
 void wake_callbak()
 {
-#define EXAMPLE_BUFF_SIZE 1 * 1024 // 接收BUFF
     ESP_LOGI(TAG, "开始录音...");
-    i2s_mic_init();
-
-    // 初始化UDP主机地址参数
-    int soock = -1;
-    struct sockaddr_in client_addr;
-    // client_addr.sin_addr.s_addr = inet_addr("192.168.88.250");
-    client_addr.sin_addr.s_addr = inet_addr("192.168.100.6");
-    client_addr.sin_family = AF_INET;
-    client_addr.sin_port = htons(7456);
-
-    // 创建UDP套接字
-    soock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (soock < 0)
-    {
-        ESP_LOGE("UDP_CLIENT", "UDP_CLIENT套接字创建失败！\r\n");
-    }
-    ESP_LOGI("UDP_CLIENT", "UDP_CLIENT套接字创建成功！\r\n");
+    // ad_buffer = malloc(SAMPLE_RATE * MAX_RECORD_SEC * sizeof(int32_t));
+    ad_buffer_16 = malloc(SAMPLE_RATE * MAX_RECORD_SEC * sizeof(int16_t));
 
     uint8_t *r_buf = (uint8_t *)calloc(1, EXAMPLE_BUFF_SIZE);
-    assert(r_buf); // Check if r_buf allocation success
+    assert(r_buf);
     size_t r_bytes = 0;
 
-    // udp_do_init();
-    // uint16_t cnt = 0;
     while (1)
     {
         if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
         {
-            // r_buf 是 uint8_t*，这里要按 32 位整型解析
+            // 样本指针：每个元素标识一个样本 r_buf 是 uint8_t*，这里要按 32 位整型解析
             int32_t *samples = (int32_t *)r_buf;
-            // 2048/32 = 512 个样本，每个样子占用4字节，其中只有24位有效
+            // 样本数： 1024/4 = 256 个样本，每个样子占用4字节，其中只有24位有效
             int sample_count = r_bytes / sizeof(int32_t);
 
-            // int64_t sum = 0;
-            // for (int i = 0; i < sample_count; i++)
-            // {
-            //     sum += llabs(samples[i]); // 用 llabs 防止溢出
-            // }
-
-            // int64_t avg = sum / sample_count;
-            // ESP_LOGI(TAG, "Average amplitude: %lld", avg);
-
-            const float gain = 4.0f; // 📢 调节这个倍数来放大音量，建议 8~16
+            const float gain = 12.0f; // 📢 调节这个倍数来放大音量，建议 8~16
             // 🎚️ 软件放大处理
             for (int i = 0; i < sample_count; i++)
             {
+
                 int64_t v = (int64_t)(samples[i] * gain);
                 if (v > INT32_MAX)
                     v = INT32_MAX;
                 else if (v < INT32_MIN)
                     v = INT32_MIN;
                 samples[i] = (int32_t)v;
-            }
+                // r_buf_16[i] = (int16_t)(samples[i] >> 16);
 
-            esp_err_t ret = sendto(soock, (uint8_t *)r_buf, r_bytes, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-            if (ret < 0)
-            {
-                ESP_LOGE(TAG, "UDP发送失败!, %d", ret);
+                if (buffer_pos < SAMPLE_RATE * MAX_RECORD_SEC)
+                {
+                    int32_t sample = samples[i] >> 8;      // 舍弃掉低位，保留有效高位24位
+                    float f = (float)sample / 16777216.0f; // 归一化 2^24
+                    int16_t pcm16 = (int16_t)(f * 32767);  // 放大到16位 2^16
+                    ad_buffer_16[buffer_pos++] = pcm16;
+
+                    // ad_buffer[buffer_pos++] = samples[i];
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "音频缓冲区已满，停止录音！当前样本数: %d", buffer_pos);
+                    if (buffer_pos > 0)
+                    {
+                        // 发送给服务器（内部会生成 wav 并上传）
+                        // send_audio_to_server(ad_buffer, buffer_pos, 32);
+                        send_audio_to_server(ad_buffer_16, buffer_pos, 16);
+                    }
+                    buffer_pos = 0;
+                }
             }
         }
         else
@@ -508,6 +506,9 @@ void wake_callbak()
 
 void wwd_task()
 {
+    i2s_mic_init();
+    // wake_callbak();
+
     ESP_LOGI(TAG, "唤醒词任务启动，栈剩余: %d", uxTaskGetStackHighWaterMark(NULL));
 
     // 先检查可用内存
@@ -525,22 +526,63 @@ void wwd_task()
     esp_wn_iface_t *wakenet = (esp_wn_iface_t *)esp_wn_handle_from_name(model_name);
     model_iface_data_t *wn_data = wakenet->create(model_name, DET_MODE_95);
 
-    int16_t buf[I2S_BUF_LEN];
-    int stack_check_counter = 0;
+    // ad_buffer_16 = malloc(SAMPLE_RATE * MAX_RECORD_SEC * sizeof(int16_t));
+    uint8_t *r_buf = (uint8_t *)calloc(1, EXAMPLE_BUFF_SIZE);
+    assert(r_buf);
+    size_t r_bytes = 0;
+
+#define FRAME_LEN 512 // 一次送入模型的采样点数（常见 160 / 480 / 512）
+
+    int audio_chunksize = wakenet->get_samp_chunksize(wn_data);
+    int16_t *buffer = (int16_t *)malloc(audio_chunksize * sizeof(int16_t));
+    ESP_LOGI(TAG, "模型采样点数(frame len)=%d", audio_chunksize);
+    int chunks = 0;
 
     int num = 0;
     while (num < 5)
     {
-        size_t bytes_read = 0;
-        i2s_channel_read(mic_chan, buf, sizeof(buf), &bytes_read, portMAX_DELAY);
-
-        if (!wakenet->detect(wn_data, buf))
+        if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
         {
-            ESP_LOGI(TAG, "唤醒成功!");
-            stop_play_flag = true;
-            num++;
-            ESP_LOGD(TAG, "第 %d 次唤醒!", num);
-            wake_callbak();
+            int32_t *samples = (int32_t *)r_buf;
+            int sample_count = r_bytes / sizeof(int32_t);
+
+            const float gain = 12.0f;
+
+            for (int i = 0; i < sample_count; i++)
+            {
+
+                int64_t v = (int64_t)(samples[i] * gain);
+                if (v > INT32_MAX)
+                    v = INT32_MAX;
+                else if (v < INT32_MIN)
+                    v = INT32_MIN;
+                samples[i] = (int32_t)v;
+                // r_buf_16[i] = (int16_t)(samples[i] >> 16);
+
+                int32_t sample = samples[i] >> 8;      // 舍弃掉低位，保留有效高位24位
+                float f = (float)sample / 16777216.0f; // 归一化 2^24
+                int16_t pcm16 = (int16_t)(f * 32767);  // 放大到16位 2^16
+                // ad_buffer_16[buffer_pos++] = pcm16;
+
+                buffer[chunks++] = pcm16;
+
+                // ====== 4. 当达到一帧长度时送入模型检测 ======
+
+                // ad_buffer[buffer_pos++] = samples[i];
+            }
+
+            if (chunks >= audio_chunksize)
+            {
+                wakenet_state_t state = wakenet->detect(wn_data, buffer);
+                if (state == WAKENET_DETECTED)
+                {
+                    ESP_LOGI(TAG, "唤醒成功!");
+                    stop_play_flag = true;
+                    num++;
+                    ESP_LOGD(TAG, "第 %d 次唤醒!", num);
+                }
+                chunks = 0; // 清空缓冲区位置
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(1)); // 添加小延迟避免过度占用CPU

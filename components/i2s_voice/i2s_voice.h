@@ -36,6 +36,24 @@ typedef struct
     wav_info_t wav_info;
     bool header_parsed;
 } stream_ctx_t;
+
+typedef struct
+{
+    char riff_id[4]; // "RIFF"
+    uint32_t riff_size;
+    char wave_id[4]; // "WAVE"
+    char fmt_id[4];  // "fmt "
+    uint32_t fmt_size;
+    uint16_t audio_format;
+    uint16_t num_channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    char data_id[4]; // "data"
+    uint32_t data_size;
+} wav_header_t;
+
 typedef struct
 {
     uint8_t *data;
