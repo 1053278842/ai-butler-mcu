@@ -15,13 +15,21 @@
 #include <math.h>
 #include "esp_timer.h"
 
-#include "driver/i2s.h"
-#include "driver/i2s_common.h"
+#include "esp_vadn_models.h"
+#include "esp_afe_sr_models.h"
+#include "esp_mn_iface.h"
+#include "esp_mn_models.h"
+// #include "esp_board_init.h"
 
-#include "socket.h"
-#include "lwip/inet.h"
-#include "lwip/err.h"
-#include "lwip/sys.h"
+// #include "driver/i2s.h"
+// #include "driver/i2s_common.h"
+
+// #include "socket.h"
+// #include "lwip/inet.h"
+// #include "lwip/err.h"
+// #include "lwip/sys.h"
+
+#include "pcm_util.h"
 
 // WAV header 信息
 typedef struct

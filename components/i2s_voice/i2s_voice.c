@@ -10,7 +10,7 @@
 #define SAMPLE_RATE 16000
 #define I2S_BUF_LEN 64
 #define WWN_MODLE "hiesp"
-#define VAD_THRESHOLD 5000
+#define VAD_THRESHOLD 8000
 #define EXAMPLE_BUFF_SIZE 1 * 1024 // 接收BUFF
 
 #define MAX_RECORD_SEC 10
@@ -26,18 +26,17 @@
 int32_t *ad_buffer = NULL;
 int16_t *ad_buffer_16 = NULL;
 
-static int64_t last_loud_time = 0;
 static float *audio_buffer = NULL;
 static size_t buffer_pos = 0;
-static int active = 0;
-static int silence_samples = 0;
-static int64_t recording_start_time = 0; // 录音开始时间
-static bool recording_enabled = true;    // 录音使能标志
+
 int32_t r_buf[SAMPLE_SIZE + 32];
+
+volatile bool need_record = false;
 
 static i2s_chan_handle_t spk_chan = NULL; // 使用新的 I2S 通道句柄
 static i2s_chan_handle_t mic_chan = NULL; // 使用新的 I2S 通道句柄
 volatile bool stop_play_flag = false;
+// vad
 
 void i2s_spk_init(uint32_t sample_rate, uint16_t bits, uint16_t channels)
 {
@@ -283,23 +282,6 @@ void init_audio_buffer()
         ESP_LOGI(TAG, "音频缓冲区初始化完成: %.2f KB", buffer_size / 1024.0);
     }
 }
-// 把归一化 float[-1.0,1.0] 转为 int16 PCM
-static void float_to_int16(const float *in, int16_t *out, size_t samples)
-{
-    for (size_t i = 0; i < samples; ++i)
-    {
-        float v = in[i];
-
-        // 简单的边界检查
-        if (v > 1.0f)
-            v = 1.0f;
-        if (v < -1.0f)
-            v = -1.0f;
-
-        // 简单的转换
-        out[i] = (int16_t)(v * 32767.0f);
-    }
-}
 
 // 处理采样
 void process_sample(int32_t raw)
@@ -451,6 +433,8 @@ void wake_callbak()
     assert(r_buf);
     size_t r_bytes = 0;
 
+    size_t slient_samples_count = 0;
+    size_t slient_max_samples = SAMPLE_RATE / (EXAMPLE_BUFF_SIZE / sizeof(int32_t)) * 3; // 3s 静音结束录音
     while (1)
     {
         if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
@@ -460,39 +444,65 @@ void wake_callbak()
             // 样本数： 1024/4 = 256 个样本，每个样子占用4字节，其中只有24位有效
             int sample_count = r_bytes / sizeof(int32_t);
 
-            const float gain = 12.0f; // 📢 调节这个倍数来放大音量，建议 8~16
-            // 🎚️ 软件放大处理
+            // 1️⃣ 计算当前帧音量（RMS）
+            float rms = pcm_calc_rms(samples, sample_count);
+            // 平滑RMS，避免抖动
+            rms = pcm_smooth_rms(rms);
+            // 自动增益控制
+            float gain = pcm_agc_get_gain(rms);
+            // 麻痹哦太难控制增益了，不搞了日
+            // float gain = 1.0f;
+
+            double sum = 0;
             for (int i = 0; i < sample_count; i++)
             {
+                int32_t sample = samples[i];
+                pcm_amplify(&sample, gain);
+                int16_t pcm16 = pcm32_to_pcm16(sample);
 
-                int64_t v = (int64_t)(samples[i] * gain);
-                if (v > INT32_MAX)
-                    v = INT32_MAX;
-                else if (v < INT32_MIN)
-                    v = INT32_MIN;
-                samples[i] = (int32_t)v;
-                // r_buf_16[i] = (int16_t)(samples[i] >> 16);
+                float f = (float)pcm16 / 32768.0f; // 归一化到 -1.0 ~ 1.0
+                sum += f * f;
 
-                if (buffer_pos < SAMPLE_RATE * MAX_RECORD_SEC)
+                ad_buffer_16[buffer_pos++] = pcm16;
+                if (buffer_pos >= SAMPLE_RATE * MAX_RECORD_SEC)
                 {
-                    int32_t sample = samples[i] >> 8;      // 舍弃掉低位，保留有效高位24位
-                    float f = (float)sample / 16777216.0f; // 归一化 2^24
-                    int16_t pcm16 = (int16_t)(f * 32767);  // 放大到16位 2^16
-                    ad_buffer_16[buffer_pos++] = pcm16;
-
-                    // ad_buffer[buffer_pos++] = samples[i];
+                    ESP_LOGI(TAG, "缓冲区满，强制结束录音，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
+                    buffer_pos = 0;
                 }
-                else
+            }
+
+            float rms_16 = sqrt(sum / sample_count) * 32768.0f;
+            ESP_LOGI("TAG", "rms:%.2f,rms16:%.2f", rms, rms_16);
+            if (rms < 800)
+            {
+                // ESP_LOGI(TAG, "环境音, 样本数: %d, 音频值：%.2f, 静音样本数：%zu", buffer_pos, rms_16, slient_samples_count);
+
+                slient_samples_count += 1;
+                if (slient_samples_count >= slient_max_samples && need_record == true) // 静音超过3秒
                 {
-                    ESP_LOGW(TAG, "音频缓冲区已满，停止录音！当前样本数: %d", buffer_pos);
+                    // ESP_LOGI(TAG, "静音超过3秒，录音结束，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
+
                     if (buffer_pos > 0)
                     {
                         // 发送给服务器（内部会生成 wav 并上传）
                         // send_audio_to_server(ad_buffer, buffer_pos, 32);
                         send_audio_to_server(ad_buffer_16, buffer_pos, 16);
                     }
+                    // 清空录音缓冲，准备下一次
                     buffer_pos = 0;
+                    slient_samples_count = 0;
+                    need_record = false;
+                    // free(ad_buffer_16);
+                    // ad_buffer_16 = NULL;
+                    // ESP_LOGI(TAG, "录音已完成，等待下一次唤醒");
+                    // return; // 结束录音任务
                 }
+            }
+            else
+            {
+                // ESP_LOGI(TAG, "检测到声音, 样本数: %d, 音频值：%.2f,静音样本数：%zu", buffer_pos, rms_16, slient_samples_count);
+                slient_samples_count = 0; // 有声音，重置静音计数
+                need_record = true;
             }
         }
         else
@@ -501,6 +511,90 @@ void wake_callbak()
         }
     }
     free(r_buf);
+    vTaskDelete(NULL);
+}
+
+typedef struct
+{
+    esp_afe_sr_iface_t *handle;
+    esp_afe_sr_data_t *data;
+} vad_ctx_t;
+vad_ctx_t *init_vad_mod()
+{
+    srmodel_list_t *models = esp_srmodel_init("model");
+    afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    afe_config->vad_min_noise_ms = 1000; // The minimum duration of noise or silence in ms.
+    afe_config->vad_min_speech_ms = 128; // The minimum duration of speech in ms.
+    afe_config->vad_mode = VAD_MODE_1;   // The larger the mode, the higher the speech trigger probability.
+
+    vad_ctx_t *ctx = malloc(sizeof(vad_ctx_t));
+    ctx->handle = esp_afe_handle_from_config(afe_config);
+    ctx->data = ctx->handle->create_from_config(afe_config);
+    afe_config_free(afe_config);
+    return ctx;
+}
+
+void feed_Task(void *arg)
+{
+    vad_ctx_t *vad = (vad_ctx_t *)arg;
+    esp_afe_sr_data_t *afe_data = vad->data;
+    esp_afe_sr_iface_t *afe_handle = vad->handle;
+    int audio_chunksize = afe_handle->get_feed_chunksize(afe_data);
+    int nch = afe_handle->get_feed_channel_num(afe_data);
+
+    int16_t *i2s_buff = malloc(audio_chunksize * sizeof(int16_t) * nch);                // 512 * 2 = 1024bytes ,512个元素
+    uint8_t *r_buf = (uint8_t *)calloc(1, audio_chunksize * sizeof(int16_t) * nch * 2); // 2028bytes,512个元素，每个元素32-16bits
+    size_t r_bytes = 0;
+    size_t chunks = 0;
+    assert(i2s_buff);
+
+    while (1)
+    {
+        i2s_channel_read(mic_chan, r_buf, audio_chunksize * sizeof(int16_t) * nch, &r_bytes, portMAX_DELAY);
+        int32_t *samples = (int32_t *)r_buf;
+        int sample_count = r_bytes / sizeof(int32_t);
+        // ESP_LOGI(TAG, "增益：%.2f,rms:%.2f", gain, rms);
+        for (int i = 0; i < sample_count; i++)
+        {
+            int32_t sample = samples[i];
+            pcm_amplify(&sample, 10.0f);
+            int16_t pcm16 = pcm32_to_pcm16(sample);
+            i2s_buff[chunks++] = pcm16;
+        }
+        chunks = 0;
+        // memset(i2s_buff, 0, audio_chunksize * nch * sizeof(int16_t));
+
+        // esp_get_feed_data(true, i2s_buff, audio_chunksize * sizeof(int16_t) * feed_channel);
+        afe_handle->feed(afe_data, i2s_buff);
+    }
+    if (i2s_buff)
+    {
+        free(i2s_buff);
+        i2s_buff = NULL;
+    }
+    vTaskDelete(NULL);
+}
+
+void detect_Task(void *arg)
+{
+    vad_ctx_t *vad = (vad_ctx_t *)arg;
+    esp_afe_sr_data_t *afe_data = vad->data;
+    esp_afe_sr_iface_t *afe_handle = vad->handle;
+    // int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
+    // int16_t *buff = malloc(afe_chunksize * sizeof(int16_t));
+    // assert(buff);
+
+    while (1)
+    {
+        afe_fetch_result_t *res = afe_handle->fetch(afe_data);
+        if (!res || res->ret_value == ESP_FAIL)
+        {
+            printf("fetch error!\n");
+            break;
+        }
+        printf("vad state: %s\n", res->vad_state == VAD_SILENCE ? "noise" : "speech");
+    }
+
     vTaskDelete(NULL);
 }
 
@@ -531,44 +625,39 @@ void wwd_task()
     assert(r_buf);
     size_t r_bytes = 0;
 
-#define FRAME_LEN 512 // 一次送入模型的采样点数（常见 160 / 480 / 512）
-
     int audio_chunksize = wakenet->get_samp_chunksize(wn_data);
     int16_t *buffer = (int16_t *)malloc(audio_chunksize * sizeof(int16_t));
     ESP_LOGI(TAG, "模型采样点数(frame len)=%d", audio_chunksize);
     int chunks = 0;
+    //
+    vad_ctx_t *vad = init_vad_mod();
+    esp_afe_sr_iface_t *afe_handle = vad->handle;
+    esp_afe_sr_data_t *afe_data = vad->data;
 
-    int num = 0;
-    while (num < 5)
+    // xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void *)vad, 5, NULL, 0);
+    // xTaskCreatePinnedToCore(&detect_Task, "detect", 4 * 1024, (void *)vad, 5, NULL, 1);
+
+    while (1)
     {
         if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
         {
             int32_t *samples = (int32_t *)r_buf;
             int sample_count = r_bytes / sizeof(int32_t);
 
-            const float gain = 12.0f;
-
+            // 1️⃣ 计算当前帧音量（RMS）
+            float rms = pcm_calc_rms(samples, sample_count);
+            // 平滑RMS，避免抖动
+            rms = pcm_smooth_rms(rms);
+            // 自动增益控制
+            float gain = pcm_agc_get_gain(rms);
+            // ESP_LOGI(TAG, "增益：%.2f,rms:%.2f", gain, rms);
             for (int i = 0; i < sample_count; i++)
             {
-
-                int64_t v = (int64_t)(samples[i] * gain);
-                if (v > INT32_MAX)
-                    v = INT32_MAX;
-                else if (v < INT32_MIN)
-                    v = INT32_MIN;
-                samples[i] = (int32_t)v;
-                // r_buf_16[i] = (int16_t)(samples[i] >> 16);
-
-                int32_t sample = samples[i] >> 8;      // 舍弃掉低位，保留有效高位24位
-                float f = (float)sample / 16777216.0f; // 归一化 2^24
-                int16_t pcm16 = (int16_t)(f * 32767);  // 放大到16位 2^16
-                // ad_buffer_16[buffer_pos++] = pcm16;
+                int32_t sample = samples[i];
+                pcm_amplify(&sample, gain);
+                int16_t pcm16 = pcm32_to_pcm16(sample);
 
                 buffer[chunks++] = pcm16;
-
-                // ====== 4. 当达到一帧长度时送入模型检测 ======
-
-                // ad_buffer[buffer_pos++] = samples[i];
             }
 
             if (chunks >= audio_chunksize)
@@ -578,8 +667,16 @@ void wwd_task()
                 {
                     ESP_LOGI(TAG, "唤醒成功!");
                     stop_play_flag = true;
-                    num++;
-                    ESP_LOGD(TAG, "第 %d 次唤醒!", num);
+                    // 前置活动：闪灯
+                    // 活动：录音
+                    // 条件：触发唤醒回调时
+                    // 限制：无，任意时刻唤醒都出发
+                    // 录音逻辑
+                    // 持续监听，不限制长度 (环形缓冲区)
+                    // 中断条件：声音阈值<某个范围
+                    // 结果：将环形缓冲区上传到api接口中
+                    // 注意：监听期间不发声音。
+                    // wake_callbak();
                 }
                 chunks = 0; // 清空缓冲区位置
             }
