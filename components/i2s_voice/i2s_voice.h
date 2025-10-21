@@ -19,6 +19,8 @@
 #include "esp_afe_sr_models.h"
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
+
+#include "stream_upload.h"
 // #include "esp_board_init.h"
 
 // #include "driver/i2s.h"
@@ -68,34 +70,9 @@ typedef struct
     bool header_parsed;
 } stream_ctx_t;
 
-typedef struct
-{
-    char riff_id[4]; // "RIFF"
-    uint32_t riff_size;
-    char wave_id[4]; // "WAVE"
-    char fmt_id[4];  // "fmt "
-    uint32_t fmt_size;
-    uint16_t audio_format;
-    uint16_t num_channels;
-    uint32_t sample_rate;
-    uint32_t byte_rate;
-    uint16_t block_align;
-    uint16_t bits_per_sample;
-    char data_id[4]; // "data"
-    uint32_t data_size;
-} wav_header_t;
-
-typedef struct
-{
-    uint8_t *data;
-    size_t length;
-} wav_mem_t;
-
 // 初始化
 void i2s_spk_init(uint32_t sample_rate, uint16_t bits, uint16_t channels);
 i2s_chan_handle_t i2s_mic_init();
-// 解析wav
-bool parse_wav_header(uint8_t *data, wav_info_t *info);
 
 // http请求回调
 esp_err_t voice_http_event_handler(esp_http_client_event_t *evt);

@@ -8,17 +8,9 @@
 #define TAG "AUDIO_PLAYER"
 
 #define SAMPLE_RATE 16000
-#define WWN_MODLE "hiesp"
-#define EXAMPLE_BUFF_SIZE 1 * 1024 // 接收BUFF
-#define MAX_RECORD_SEC 10
-
-int16_t *ad_buffer_16 = NULL;
-static size_t buffer_pos = 0;
-
-volatile bool need_record = false;
 
 static i2s_chan_handle_t spk_chan = NULL; // 使用新的 I2S 通道句柄
-static i2s_chan_handle_t mic_chan = NULL; // 使用新的 I2S 通道句柄
+static i2s_chan_handle_t mic_chan = NULL; // 使用新的 I2S 通道句柄fv
 QueueHandle_t frame_queue;
 // vad
 
@@ -121,229 +113,30 @@ i2s_chan_handle_t i2s_mic_init()
 
     return mic_chan;
 }
-/**
- * 创建 WAV 文件（支持 16位 / 32位 深度）
- * @param buf      音频数据指针（int16_t* 或 int32_t*）
- * @param samples  样本数量
- * @param sample_rate  采样率
- * @param bits_per_sample  每样本位深（16 或 32）
- */
-static wav_mem_t create_wav_in_memory(const void *buf, size_t samples, int sample_rate, int bits_per_sample)
-{
-    wav_mem_t wav = {0};
-
-    if (!buf || samples == 0 || (bits_per_sample != 16 && bits_per_sample != 32))
-        return wav;
-
-    const uint8_t *pcm_data = (const uint8_t *)buf;
-    uint32_t bytes_per_sample = bits_per_sample / 8;
-    uint32_t data_size = samples * bytes_per_sample;
-
-    wav_header_t header;
-    memcpy(header.riff_id, "RIFF", 4);
-    memcpy(header.wave_id, "WAVE", 4);
-    memcpy(header.fmt_id, "fmt ", 4);
-    memcpy(header.data_id, "data", 4);
-
-    header.fmt_size = 16;
-    header.audio_format = 1; // PCM
-    header.num_channels = 1;
-    header.sample_rate = sample_rate;
-    header.bits_per_sample = bits_per_sample;
-    header.block_align = header.num_channels * bytes_per_sample;
-    header.byte_rate = header.sample_rate * header.block_align;
-    header.data_size = data_size;
-    header.riff_size = 36 + data_size;
-
-    wav.length = sizeof(wav_header_t) + data_size;
-    wav.data = malloc(wav.length);
-    if (!wav.data)
-        return wav;
-
-    memcpy(wav.data, &header, sizeof(wav_header_t));
-    memcpy(wav.data + sizeof(wav_header_t), pcm_data, data_size);
-
-    return wav;
-}
-
-void upload_wav_memory(const char *url, const uint8_t *data, size_t length)
-{
-    ESP_LOGI(TAG, "开始上传 WAV 数据, 大小: %d bytes", (int)length);
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-
-    // 手动构造 multipart/form-data 请求体
-    const char *boundary = "----ESP32Boundary";
-    char header[128];
-    snprintf(header, sizeof(header),
-             "multipart/form-data; boundary=%s", boundary);
-    esp_http_client_set_header(client, "Content-Type", header);
-
-    // ==== 构造 multipart 数据 ====
-    char start[256];
-    int start_len = snprintf(start, sizeof(start),
-                             "--%s\r\n"
-                             "Content-Disposition: form-data; name=\"file\"; filename=\"voice.wav\"\r\n"
-                             "Content-Type: audio/wav\r\n\r\n",
-                             boundary);
-
-    const char *end_fmt = "\r\n--%s--\r\n";
-    char end[64];
-    int end_len = snprintf(end, sizeof(end), end_fmt, boundary);
-
-    // 总长度
-    size_t total_len = start_len + length + end_len;
-    uint8_t *post_data = malloc(total_len);
-    if (!post_data)
-    {
-        ESP_LOGE(TAG, "内存不足，无法构造上传包");
-        esp_http_client_cleanup(client);
-        return;
-    }
-
-    memcpy(post_data, start, start_len);
-    memcpy(post_data + start_len, data, length);
-    memcpy(post_data + start_len + length, end, end_len);
-
-    esp_http_client_set_post_field(client, (const char *)post_data, total_len);
-
-    // 执行上传
-    esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK)
-    {
-        ESP_LOGI(TAG, "上传成功, 状态码 = %d",
-                 esp_http_client_get_status_code(client));
-    }
-    else
-    {
-        ESP_LOGE(TAG, "上传失败: %s", esp_err_to_name(err));
-    }
-
-    free(post_data);
-    esp_http_client_cleanup(client);
-}
-
-void send_audio_to_server(const void *buf, size_t samples, int bits_per_sample)
-{
-    wav_mem_t wav = create_wav_in_memory(buf, samples, SAMPLE_RATE, bits_per_sample);
-    if (wav.data)
-    {
-        ESP_LOGI(TAG, "WAV内存数据大小: %zu bytes", wav.length);
-        // upload_wav_memory("http://192.168.1.100:8080/upload", wav.data, wav.length);
-        upload_wav_memory("http://121.36.251.16:7999/api/upload", wav.data, wav.length);
-
-        free(wav.data);
-    }
-    else
-    {
-        ESP_LOGE(TAG, "内存分配失败，无法创建 WAV 数据");
-    }
-}
-
-void wake_callbak()
-{
-    ESP_LOGI(TAG, "开始录音...");
-    // ad_buffer = malloc(SAMPLE_RATE * MAX_RECORD_SEC * sizeof(int32_t));
-    ad_buffer_16 = malloc(SAMPLE_RATE * MAX_RECORD_SEC * sizeof(int16_t));
-
-    uint8_t *r_buf = (uint8_t *)calloc(1, EXAMPLE_BUFF_SIZE);
-    assert(r_buf);
-    size_t r_bytes = 0;
-
-    size_t slient_samples_count = 0;
-    size_t slient_max_samples = SAMPLE_RATE / (EXAMPLE_BUFF_SIZE / sizeof(int32_t)) * 3; // 3s 静音结束录音
-    while (1)
-    {
-        if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
-        {
-            // 样本指针：每个元素标识一个样本 r_buf 是 uint8_t*，这里要按 32 位整型解析
-            int32_t *samples = (int32_t *)r_buf;
-            // 样本数： 1024/4 = 256 个样本，每个样子占用4字节，其中只有24位有效
-            int sample_count = r_bytes / sizeof(int32_t);
-
-            // 1️⃣ 计算当前帧音量（RMS）
-            float rms = pcm_calc_rms(samples, sample_count);
-            // 平滑RMS，避免抖动
-            rms = pcm_smooth_rms(rms);
-            // 自动增益控制
-            float gain = pcm_agc_get_gain(rms);
-            // 麻痹哦太难控制增益了，不搞了日
-            // float gain = 1.0f;
-
-            double sum = 0;
-            for (int i = 0; i < sample_count; i++)
-            {
-                int32_t sample = samples[i];
-                pcm_amplify(&sample, gain);
-                int16_t pcm16 = pcm32_to_pcm16(sample);
-
-                float f = (float)pcm16 / 32768.0f; // 归一化到 -1.0 ~ 1.0
-                sum += f * f;
-
-                ad_buffer_16[buffer_pos++] = pcm16;
-                if (buffer_pos >= SAMPLE_RATE * MAX_RECORD_SEC)
-                {
-                    ESP_LOGI(TAG, "缓冲区满，强制结束录音，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
-                    buffer_pos = 0;
-                }
-            }
-
-            float rms_16 = sqrt(sum / sample_count) * 32768.0f;
-            ESP_LOGI("TAG", "rms:%.2f,rms16:%.2f", rms, rms_16);
-            if (rms < 800)
-            {
-                // ESP_LOGI(TAG, "环境音, 样本数: %d, 音频值：%.2f, 静音样本数：%zu", buffer_pos, rms_16, slient_samples_count);
-
-                slient_samples_count += 1;
-                if (slient_samples_count >= slient_max_samples && need_record == true) // 静音超过3秒
-                {
-                    // ESP_LOGI(TAG, "静音超过3秒，录音结束，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
-
-                    if (buffer_pos > 0)
-                    {
-                        // 发送给服务器（内部会生成 wav 并上传）
-                        // send_audio_to_server(ad_buffer, buffer_pos, 32);
-                        send_audio_to_server(ad_buffer_16, buffer_pos, 16);
-                    }
-                    // 清空录音缓冲，准备下一次
-                    buffer_pos = 0;
-                    slient_samples_count = 0;
-                    need_record = false;
-                    // free(ad_buffer_16);
-                    // ad_buffer_16 = NULL;
-                    // ESP_LOGI(TAG, "录音已完成，等待下一次唤醒");
-                    // return; // 结束录音任务
-                }
-            }
-            else
-            {
-                // ESP_LOGI(TAG, "检测到声音, 样本数: %d, 音频值：%.2f,静音样本数：%zu", buffer_pos, rms_16, slient_samples_count);
-                slient_samples_count = 0; // 有声音，重置静音计数
-                need_record = true;
-            }
-        }
-        else
-        {
-            ESP_LOGE(TAG, "Read Task: i2s read failed\n");
-        }
-    }
-    free(r_buf);
-    vTaskDelete(NULL);
-}
 
 vad_ctx_t *init_vad_mod()
 {
     srmodel_list_t *models = esp_srmodel_init("model");
     afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
-    afe_config->vad_min_noise_ms = 1000; // The minimum duration of noise or silence in ms.
-    afe_config->vad_min_speech_ms = 256; // The minimum duration of speech in ms.
-    afe_config->vad_mode = VAD_MODE_1;   // The larger the mode, the higher the speech trigger probability.
-    // afe_config->agc_mode = 2;            // 启用更强的自动增益控制（AGC）
+    afe_config->vad_min_noise_ms = 800;  // The minimum duration of noise or silence in ms.
+    afe_config->vad_min_speech_ms = 512; // The minimum duration of speech in ms.
+    afe_config->vad_mode = VAD_MODE_0;   // 这傻逼玩意，别信他的注释（“So If you want trigger more speech, please select lower mode.”）。明明是越大越灵敏
+    afe_config->agc_mode = 2;            // 启用更强的自动增益控制（AGC）
+
+    // 噪声抑制
+    char *ns_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
+    if (ns_model_name != NULL)
+    {
+        afe_config->ns_init = true;
+        afe_config->ns_model_name = ns_model_name;
+        afe_config->afe_ns_mode = AFE_NS_MODE_NET;
+        ESP_LOGI(TAG, "找到噪声抑制模型：%s，启用噪声抑制", ns_model_name);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "未找到噪声抑制模型，禁用噪声抑制");
+        afe_config->ns_init = false;
+    }
 
     vad_ctx_t *ctx = malloc(sizeof(vad_ctx_t));
     ctx->handle = esp_afe_handle_from_config(afe_config);
@@ -389,42 +182,6 @@ void feed_Task(void *arg)
     vTaskDelete(NULL);
 }
 
-void start_stream_upload(esp_http_client_handle_t *client)
-{
-    ESP_LOGI("UPLOAD", "打开HTTP连接!");
-    if (*client == NULL)
-    {
-        esp_http_client_config_t config = {
-            .url = "http://121.36.251.16:7999/api/stream_upload",
-            .method = HTTP_METHOD_POST,
-            .timeout_ms = 30000,
-        };
-        *client = esp_http_client_init(&config);
-    }
-
-    esp_http_client_set_header(*client, "Content-Type", "audio/pcm");
-    esp_http_client_set_header(*client, "Transfer-Encoding", "chunked");
-    esp_http_client_set_header(*client, "Connection", "keep-alive");
-
-    esp_err_t err = esp_http_client_open(*client, -1);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE("UPLOAD", "打开HTTP连接失败: %s", esp_err_to_name(err));
-        return;
-    }
-}
-
-void stop_stream_upload(esp_http_client_handle_t *client)
-{
-    ESP_LOGI("UPLOAD", "关闭HTTP连接!");
-    const char *end_chunk = "0\r\n\r\n";
-    esp_http_client_write(*client, end_chunk, strlen(end_chunk));
-
-    esp_http_client_close(*client);
-    esp_http_client_cleanup(*client);
-    *client = NULL;
-}
-
 void detect_Task(void *arg)
 {
     vad_ctx_t *vad = (vad_ctx_t *)arg;
@@ -455,7 +212,7 @@ void detect_Task(void *arg)
                 upload_msg_t msg = {.type = UPLOAD_MSG_START};
                 xQueueSend(frame_queue, &msg, 0);
 
-                // start_stream_upload(&ctx, afe_chunksize);
+                // stream_upload_start(&ctx, afe_chunksize);
             }
             ctx.silence_ms = 0;
         }
@@ -464,10 +221,10 @@ void detect_Task(void *arg)
             if (ctx.uploading)
             {
                 ctx.silence_ms += 32;
-                if (ctx.silence_ms > 300)
+                if (ctx.silence_ms > 2000)
                 {
                     ESP_LOGI(TAG, "检测到静音，结束流式上传");
-                    // stop_stream_upload(&ctx);
+                    // stream_upload_stop(&ctx);
                     ctx.uploading = false;
                     ctx.silence_ms = 0;
                     upload_msg_t msg = {.type = UPLOAD_MSG_STOP};
@@ -524,16 +281,15 @@ void upload_Task(void *arg)
             switch (msg.type)
             {
             case UPLOAD_MSG_START:
-                start_stream_upload(&client);
+                stream_upload_start(&client);
                 break;
 
             case UPLOAD_MSG_DATA:
-                ESP_LOGI("UPLOAD", "数据输入中!");
-                esp_http_client_write(client, (const char *)msg.data, msg.len);
+                stream_upload_write(&client, (char *)msg.data, msg.len);
                 break;
 
             case UPLOAD_MSG_STOP:
-                stop_stream_upload(&client);
+                stream_upload_stop(&client);
                 break;
             }
         }
