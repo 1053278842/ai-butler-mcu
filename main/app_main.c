@@ -44,6 +44,8 @@ static void event_handler(void *handler_arg,
             ESP_LOGI(TAG, "WiFi 连接成功!存储本次凭证,关闭WEB服务,关闭AP WIFI模式,关闭指示灯");
             ESP_LOGI(TAG, "开启 MQTT 任务");
             start_mqtt_ssl(); // 启动 MQTT 任务
+
+            wwd_task();
             break;
 
         case WIFI_MANAGER_CONNECTED_FAIL:
@@ -86,7 +88,8 @@ void app_main(void)
     // 初始化麦克风、启动唤醒词任务
     // i2s_mic_init();
     // xTaskCreate(wwd_task, "wwd_task", 10 * 1024, NULL, 5, NULL);
-    xTaskCreate(wwd_task, "wwd_task", 8192, NULL, 5, NULL);
+
+    // xTaskCreate(wwd_task, "wwd_task", 8192, NULL, 5, NULL);
 
     if (wifi_manager_nvs_get(&info) == ESP_OK)
     {

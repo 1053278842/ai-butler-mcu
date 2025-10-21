@@ -8,34 +8,18 @@
 #define TAG "AUDIO_PLAYER"
 
 #define SAMPLE_RATE 16000
-#define I2S_BUF_LEN 64
 #define WWN_MODLE "hiesp"
-#define VAD_THRESHOLD 8000
 #define EXAMPLE_BUFF_SIZE 1 * 1024 // 接收BUFF
-
 #define MAX_RECORD_SEC 10
-#define SILENCE_THRESHOLD 0.65f // 声音阈值，降低以提高灵敏度
-#define BIT_DEPTH 24
 
-#define CONFIG_EXAMPLE_BIT_SAMPLE 32
-#define CONFIG_EXAMPLE_SAMPLE_RATE 44100
-#define NUM_CHANNELS (1) // For mono recording only!
-#define SAMPLE_SIZE (CONFIG_EXAMPLE_BIT_SAMPLE * 32)
-#define BYTE_RATE (CONFIG_EXAMPLE_SAMPLE_RATE * (CONFIG_EXAMPLE_BIT_SAMPLE / 8)) * NUM_CHANNELS
-
-int32_t *ad_buffer = NULL;
 int16_t *ad_buffer_16 = NULL;
-
-static float *audio_buffer = NULL;
 static size_t buffer_pos = 0;
-
-int32_t r_buf[SAMPLE_SIZE + 32];
 
 volatile bool need_record = false;
 
 static i2s_chan_handle_t spk_chan = NULL; // 使用新的 I2S 通道句柄
 static i2s_chan_handle_t mic_chan = NULL; // 使用新的 I2S 通道句柄
-volatile bool stop_play_flag = false;
+QueueHandle_t frame_queue;
 // vad
 
 void i2s_spk_init(uint32_t sample_rate, uint16_t bits, uint16_t channels)
@@ -101,11 +85,6 @@ i2s_chan_handle_t i2s_mic_init()
         i2s_del_channel(mic_chan);
         mic_chan = NULL;
     }
-
-    // i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    // chan_cfg.dma_frame_num = 1024;
-    // i2s_new_channel(&chan_cfg, NULL, &mic_chan);
-
     // 初始化或更新声道和时钟配置
     i2s_std_config_t std_cfg = {
         .clk_cfg =
@@ -266,163 +245,6 @@ void send_audio_to_server(const void *buf, size_t samples, int bits_per_sample)
     }
 }
 
-// 初始化音频缓冲区
-void init_audio_buffer()
-{
-    size_t buffer_size = SAMPLE_RATE * MAX_RECORD_SEC * sizeof(float);
-    audio_buffer = heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-
-    if (!audio_buffer)
-    {
-        ESP_LOGE(TAG, "音频缓冲区分配失败! 需要 %d 字节", buffer_size);
-    }
-    else
-    {
-        memset(audio_buffer, 0, buffer_size);
-        ESP_LOGI(TAG, "音频缓冲区初始化完成: %.2f KB", buffer_size / 1024.0);
-    }
-}
-
-// 处理采样
-void process_sample(int32_t raw)
-{
-    // // 检查录音是否使能
-    // if (!recording_enabled)
-    // {
-    //     return;
-    // }
-
-    // // 简化的24bit转float
-    // float norm = (float)raw / 8388608.0f;
-
-    // // 调试信息：每1000个样本检查一次数据范围
-    // if (buffer_pos % 1000 == 0)
-    // {
-    //     ESP_LOGI(TAG, "样本%d: 原始=0x%08X (%d), 归一化=%.6f", buffer_pos, raw, raw, norm);
-    // }
-
-    // // 临时：打印前100个样本的详细信息用于调试
-    // if (buffer_pos < 100)
-    // {
-    //     ESP_LOGI(TAG, "调试样本%d: 原始=0x%08X (%d), 归一化=%.6f", buffer_pos, raw, raw, norm);
-    // }
-
-    // // 保存数据 - 修复缓冲区溢出问题
-    // if (buffer_pos < SAMPLE_RATE * MAX_RECORD_SEC)
-    // {
-    //     audio_buffer[buffer_pos] = norm;
-    //     buffer_pos++;
-    // }
-    // else
-    // {
-    //     ESP_LOGW(TAG, "音频缓冲区已满，停止录音！当前样本数: %d", buffer_pos);
-    //     // 缓冲区满了，直接结束录音并上传
-    //     ESP_LOGI(TAG, "缓冲区满，强制结束录音，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
-
-    //     if (buffer_pos > 0)
-    //     {
-    //         // 分配 int16_t 缓冲并把 float -> int16
-    //         int16_t *pcm16 = malloc(buffer_pos * sizeof(int16_t));
-    //         if (!pcm16)
-    //         {
-    //             ESP_LOGE(TAG, "无法分配 pcm16 缓冲 (%zu bytes)", buffer_pos * sizeof(int16_t));
-    //         }
-    //         else
-    //         {
-    //             float_to_int16(audio_buffer, pcm16, buffer_pos);
-
-    //             // 发送给服务器（内部会生成 wav 并上传）
-    //             send_audio_to_server(pcm16, buffer_pos);
-
-    //             free(pcm16);
-    //         }
-    //     }
-
-    //     // 清空录音缓冲，准备下一次
-    //     buffer_pos = 0;
-    //     active = 0;
-    //     silence_samples = 0;
-    //     recording_start_time = 0; // 重置录音开始时间
-
-    //     // 暂时禁用录音，避免死循环
-    //     recording_enabled = false;
-    //     ESP_LOGI(TAG, "录音已禁用，等待重新启动");
-
-    //     return; // 缓冲区满了，停止处理
-    // }
-
-    // int64_t now = esp_timer_get_time(); // 获取当前时间 (微秒)
-    // // 检测声音
-    // if (fabsf(norm) > SILENCE_THRESHOLD)
-    // {
-    //     if (!active) // 第一次检测到声音
-    //     {
-    //         ESP_LOGI(TAG, "开始检测到声音, 样本数: %d, 音频值：%.6f", buffer_pos, fabsf(norm));
-    //     }
-    //     active = 1;
-    //     last_loud_time = now; // 有声音时更新时间戳
-    // }
-    // else if (buffer_pos % 1000 == 0) // 每1000个样本打印一次调试信息
-    // {
-    //     ESP_LOGI(TAG, "样本数: %d, 当前音频值: %.6f, 阈值: %.6f, active: %d", buffer_pos, fabsf(norm), SILENCE_THRESHOLD, active);
-    // }
-
-    // // 初始化录音开始时间
-    // if (buffer_pos == 1 && recording_start_time == 0)
-    // {
-    //     recording_start_time = now;
-    //     ESP_LOGI(TAG, "开始录音，时间戳: %lld", recording_start_time);
-    // }
-
-    // // 修改逻辑：录音至少持续2秒，然后检测静音
-    // if (active || (now - recording_start_time) < 2 * 1000000) // 录音至少2秒
-    // {
-    //     // 检查是否超过3秒静音（只有在录音超过2秒后才检查）
-    //     if (active && (now - last_loud_time) > 3 * 1000000) // 超过3秒没声音
-    //     {
-    //         ESP_LOGI(TAG, "静音超过3秒，录音结束，共 %d 样本 (%.2f秒)", (int)buffer_pos, buffer_pos / (float)SAMPLE_RATE);
-
-    //         // 检查是否有足够的录音数据（至少1秒）
-    //         if (buffer_pos < SAMPLE_RATE * 1) // 至少1秒的录音
-    //         {
-    //             ESP_LOGW(TAG, "录音时长太短（%.2f秒），丢弃录音数据", buffer_pos / (float)SAMPLE_RATE);
-    //             buffer_pos = 0;
-    //             active = 0;
-    //             silence_samples = 0;
-    //             return;
-    //         }
-
-    //         if (buffer_pos > 0)
-    //         {
-    //             // 分配 int16_t 缓冲并把 float -> int16
-    //             int16_t *pcm16 = malloc(buffer_pos * sizeof(int16_t));
-    //             if (!pcm16)
-    //             {
-    //                 ESP_LOGE(TAG, "无法分配 pcm16 缓冲 (%zu bytes)", buffer_pos * sizeof(int16_t));
-    //             }
-    //             else
-    //             {
-    //                 float_to_int16(audio_buffer, pcm16, buffer_pos);
-
-    //                 // 发送给服务器（内部会生成 wav 并上传）
-    //                 send_audio_to_server(pcm16, buffer_pos);
-
-    //                 free(pcm16);
-    //             }
-    //         }
-    //         // 清空录音缓冲，准备下一次
-    //         buffer_pos = 0;
-    //         active = 0;
-    //         silence_samples = 0;
-    //         recording_start_time = 0; // 重置录音开始时间
-
-    //         // 禁用录音，等待重新启动
-    //         recording_enabled = false;
-    //         ESP_LOGI(TAG, "录音已完成，已禁用等待重新启动");
-    //     }
-    // }
-}
-
 void wake_callbak()
 {
     ESP_LOGI(TAG, "开始录音...");
@@ -514,18 +336,14 @@ void wake_callbak()
     vTaskDelete(NULL);
 }
 
-typedef struct
-{
-    esp_afe_sr_iface_t *handle;
-    esp_afe_sr_data_t *data;
-} vad_ctx_t;
 vad_ctx_t *init_vad_mod()
 {
     srmodel_list_t *models = esp_srmodel_init("model");
     afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     afe_config->vad_min_noise_ms = 1000; // The minimum duration of noise or silence in ms.
-    afe_config->vad_min_speech_ms = 128; // The minimum duration of speech in ms.
+    afe_config->vad_min_speech_ms = 256; // The minimum duration of speech in ms.
     afe_config->vad_mode = VAD_MODE_1;   // The larger the mode, the higher the speech trigger probability.
+    // afe_config->agc_mode = 2;            // 启用更强的自动增益控制（AGC）
 
     vad_ctx_t *ctx = malloc(sizeof(vad_ctx_t));
     ctx->handle = esp_afe_handle_from_config(afe_config);
@@ -547,24 +365,20 @@ void feed_Task(void *arg)
     size_t r_bytes = 0;
     size_t chunks = 0;
     assert(i2s_buff);
+    ESP_LOGI(TAG, "feed chunksize=%d, nch=%d", audio_chunksize, nch);
 
     while (1)
     {
-        i2s_channel_read(mic_chan, r_buf, audio_chunksize * sizeof(int16_t) * nch, &r_bytes, portMAX_DELAY);
+        i2s_channel_read(mic_chan, r_buf, audio_chunksize * sizeof(int16_t) * nch * 2, &r_bytes, portMAX_DELAY);
         int32_t *samples = (int32_t *)r_buf;
         int sample_count = r_bytes / sizeof(int32_t);
-        // ESP_LOGI(TAG, "增益：%.2f,rms:%.2f", gain, rms);
         for (int i = 0; i < sample_count; i++)
         {
             int32_t sample = samples[i];
-            pcm_amplify(&sample, 10.0f);
             int16_t pcm16 = pcm32_to_pcm16(sample);
             i2s_buff[chunks++] = pcm16;
         }
         chunks = 0;
-        // memset(i2s_buff, 0, audio_chunksize * nch * sizeof(int16_t));
-
-        // esp_get_feed_data(true, i2s_buff, audio_chunksize * sizeof(int16_t) * feed_channel);
         afe_handle->feed(afe_data, i2s_buff);
     }
     if (i2s_buff)
@@ -575,14 +389,51 @@ void feed_Task(void *arg)
     vTaskDelete(NULL);
 }
 
+void start_stream_upload(esp_http_client_handle_t *client)
+{
+    ESP_LOGI("UPLOAD", "打开HTTP连接!");
+    if (*client == NULL)
+    {
+        esp_http_client_config_t config = {
+            .url = "http://121.36.251.16:7999/api/stream_upload",
+            .method = HTTP_METHOD_POST,
+            .timeout_ms = 30000,
+        };
+        *client = esp_http_client_init(&config);
+    }
+
+    esp_http_client_set_header(*client, "Content-Type", "audio/pcm");
+    esp_http_client_set_header(*client, "Transfer-Encoding", "chunked");
+    esp_http_client_set_header(*client, "Connection", "keep-alive");
+
+    esp_err_t err = esp_http_client_open(*client, -1);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE("UPLOAD", "打开HTTP连接失败: %s", esp_err_to_name(err));
+        return;
+    }
+}
+
+void stop_stream_upload(esp_http_client_handle_t *client)
+{
+    ESP_LOGI("UPLOAD", "关闭HTTP连接!");
+    const char *end_chunk = "0\r\n\r\n";
+    esp_http_client_write(*client, end_chunk, strlen(end_chunk));
+
+    esp_http_client_close(*client);
+    esp_http_client_cleanup(*client);
+    *client = NULL;
+}
+
 void detect_Task(void *arg)
 {
     vad_ctx_t *vad = (vad_ctx_t *)arg;
     esp_afe_sr_data_t *afe_data = vad->data;
     esp_afe_sr_iface_t *afe_handle = vad->handle;
-    // int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
-    // int16_t *buff = malloc(afe_chunksize * sizeof(int16_t));
-    // assert(buff);
+
+    int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
+    int8_t *up_buff = malloc(afe_chunksize * sizeof(int16_t) + 32);
+    stream_upload_ctx_t ctx = {0};
 
     while (1)
     {
@@ -592,98 +443,112 @@ void detect_Task(void *arg)
             printf("fetch error!\n");
             break;
         }
-        printf("vad state: %s\n", res->vad_state == VAD_SILENCE ? "noise" : "speech");
+
+        if (res->vad_state == VAD_SPEECH)
+        {
+            ESP_LOGI(TAG, "检测到人声");
+            if (!ctx.uploading)
+            {
+                ESP_LOGI(TAG, "检测到人声，开始流式上传...");
+                ctx.uploading = true;
+                ctx.silence_ms = 0;
+                upload_msg_t msg = {.type = UPLOAD_MSG_START};
+                xQueueSend(frame_queue, &msg, 0);
+
+                // start_stream_upload(&ctx, afe_chunksize);
+            }
+            ctx.silence_ms = 0;
+        }
+        else
+        {
+            if (ctx.uploading)
+            {
+                ctx.silence_ms += 32;
+                if (ctx.silence_ms > 300)
+                {
+                    ESP_LOGI(TAG, "检测到静音，结束流式上传");
+                    // stop_stream_upload(&ctx);
+                    ctx.uploading = false;
+                    ctx.silence_ms = 0;
+                    upload_msg_t msg = {.type = UPLOAD_MSG_STOP};
+                    xQueueSend(frame_queue, &msg, 0);
+                }
+            }
+        }
+
+        if (ctx.uploading)
+        {
+            size_t payload_len = res->data_size;
+            if (payload_len > 0)
+            {
+
+                char chunk_header[16];
+                snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", (unsigned int)payload_len);
+                size_t header_len = strlen(chunk_header);
+
+                // ESP_LOGI(TAG, "chunk_header:%s,chunk_size:%zu", chunk_header, header_len);
+                memcpy(up_buff, chunk_header, header_len);
+
+                // ESP_LOGI(TAG, "buff:%s,buff_size:%zu", up_buff, payload_len + 32);
+                memcpy(up_buff + header_len, res->data, payload_len);
+                memcpy(up_buff + header_len + payload_len, "\r\n", 2);
+
+                size_t total_len = header_len + payload_len + 2; // "\r\n" = 2 bytes
+
+                upload_msg_t msg = {.type = UPLOAD_MSG_DATA, .len = total_len};
+                memcpy(msg.data, up_buff, msg.len);
+                xQueueSend(frame_queue, &msg, 0);
+            }
+        }
+
+        if (res->wakeup_state == WAKENET_DETECTED)
+        {
+            ESP_LOGI(TAG, "触发唤醒词！");
+            // printf("model index:%d, word index:%d\n", res->wakenet_model_index, res->wake_word_index);
+            ESP_LOGI(TAG, "唤醒词模型索引:%d, 唤醒词索引:%d", res->wakenet_model_index, res->wake_word_index);
+        }
     }
 
     vTaskDelete(NULL);
 }
 
-void wwd_task()
+void upload_Task(void *arg)
 {
-    i2s_mic_init();
-    // wake_callbak();
-
-    ESP_LOGI(TAG, "唤醒词任务启动，栈剩余: %d", uxTaskGetStackHighWaterMark(NULL));
-
-    // 先检查可用内存
-    ESP_LOGI(TAG, "可用内存: %d", esp_get_free_heap_size());
-
-    srmodel_list_t *models = esp_srmodel_init("model");
-    if (!models)
-    {
-        ESP_LOGE(TAG, "模型初始化失败!");
-        vTaskDelete(NULL);
-    }
-
-    ESP_LOGI(TAG, "模型加载后内存: %d", esp_get_free_heap_size());
-    char *model_name = esp_srmodel_filter(models, ESP_WN_PREFIX, WWN_MODLE);
-    esp_wn_iface_t *wakenet = (esp_wn_iface_t *)esp_wn_handle_from_name(model_name);
-    model_iface_data_t *wn_data = wakenet->create(model_name, DET_MODE_95);
-
-    // ad_buffer_16 = malloc(SAMPLE_RATE * MAX_RECORD_SEC * sizeof(int16_t));
-    uint8_t *r_buf = (uint8_t *)calloc(1, EXAMPLE_BUFF_SIZE);
-    assert(r_buf);
-    size_t r_bytes = 0;
-
-    int audio_chunksize = wakenet->get_samp_chunksize(wn_data);
-    int16_t *buffer = (int16_t *)malloc(audio_chunksize * sizeof(int16_t));
-    ESP_LOGI(TAG, "模型采样点数(frame len)=%d", audio_chunksize);
-    int chunks = 0;
-    //
-    vad_ctx_t *vad = init_vad_mod();
-    esp_afe_sr_iface_t *afe_handle = vad->handle;
-    esp_afe_sr_data_t *afe_data = vad->data;
-
-    // xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void *)vad, 5, NULL, 0);
-    // xTaskCreatePinnedToCore(&detect_Task, "detect", 4 * 1024, (void *)vad, 5, NULL, 1);
+    upload_msg_t msg;
+    esp_http_client_handle_t client = NULL;
 
     while (1)
     {
-        if (i2s_channel_read(mic_chan, r_buf, EXAMPLE_BUFF_SIZE, &r_bytes, portMAX_DELAY) == ESP_OK)
+        if (xQueueReceive(frame_queue, &msg, portMAX_DELAY) == pdPASS)
         {
-            int32_t *samples = (int32_t *)r_buf;
-            int sample_count = r_bytes / sizeof(int32_t);
-
-            // 1️⃣ 计算当前帧音量（RMS）
-            float rms = pcm_calc_rms(samples, sample_count);
-            // 平滑RMS，避免抖动
-            rms = pcm_smooth_rms(rms);
-            // 自动增益控制
-            float gain = pcm_agc_get_gain(rms);
-            // ESP_LOGI(TAG, "增益：%.2f,rms:%.2f", gain, rms);
-            for (int i = 0; i < sample_count; i++)
+            switch (msg.type)
             {
-                int32_t sample = samples[i];
-                pcm_amplify(&sample, gain);
-                int16_t pcm16 = pcm32_to_pcm16(sample);
+            case UPLOAD_MSG_START:
+                start_stream_upload(&client);
+                break;
 
-                buffer[chunks++] = pcm16;
-            }
+            case UPLOAD_MSG_DATA:
+                ESP_LOGI("UPLOAD", "数据输入中!");
+                esp_http_client_write(client, (const char *)msg.data, msg.len);
+                break;
 
-            if (chunks >= audio_chunksize)
-            {
-                wakenet_state_t state = wakenet->detect(wn_data, buffer);
-                if (state == WAKENET_DETECTED)
-                {
-                    ESP_LOGI(TAG, "唤醒成功!");
-                    stop_play_flag = true;
-                    // 前置活动：闪灯
-                    // 活动：录音
-                    // 条件：触发唤醒回调时
-                    // 限制：无，任意时刻唤醒都出发
-                    // 录音逻辑
-                    // 持续监听，不限制长度 (环形缓冲区)
-                    // 中断条件：声音阈值<某个范围
-                    // 结果：将环形缓冲区上传到api接口中
-                    // 注意：监听期间不发声音。
-                    // wake_callbak();
-                }
-                chunks = 0; // 清空缓冲区位置
+            case UPLOAD_MSG_STOP:
+                stop_stream_upload(&client);
+                break;
             }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(1)); // 添加小延迟避免过度占用CPU
     }
+}
+
+void wwd_task()
+{
+    i2s_mic_init();
+    vad_ctx_t *vad = init_vad_mod();
+    frame_queue = xQueueCreate(8, sizeof(upload_msg_t));
+    xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void *)vad, 5, NULL, 0);
+    xTaskCreatePinnedToCore(&detect_Task, "detect", 8 * 1024, (void *)vad, 5, NULL, 1);
+
+    xTaskCreatePinnedToCore(&upload_Task, "upload", 8 * 1024, NULL, 5, NULL, 0);
 }
 
 // 或者在切换前完全关闭扬声器

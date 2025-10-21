@@ -30,7 +30,30 @@
 // #include "lwip/sys.h"
 
 #include "pcm_util.h"
+typedef struct
+{
+    esp_afe_sr_iface_t *handle;
+    esp_afe_sr_data_t *data;
+} vad_ctx_t;
+typedef enum
+{
+    UPLOAD_MSG_START,
+    UPLOAD_MSG_STOP,
+    UPLOAD_MSG_DATA,
+} upload_msg_type_t;
 
+typedef struct
+{
+    upload_msg_type_t type;
+    size_t len;
+    uint8_t data[2048]; // or pointer
+} upload_msg_t;
+
+typedef struct
+{
+    bool uploading;
+    int silence_ms;
+} stream_upload_ctx_t;
 // WAV header 信息
 typedef struct
 {
