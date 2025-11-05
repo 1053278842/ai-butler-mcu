@@ -305,7 +305,6 @@ void detect_Task(void *arg)
             if (payload_len > 0)
             {
                 static bool warned = false;
-                // res->data_szie = 帧采样数512 * 16位深 = 1024字节
                 upload_msg_t msg = {.type = UPLOAD_MSG_DATA, .len = res->data_size};
                 memcpy(msg.data, res->data, res->data_size);
 
@@ -394,7 +393,8 @@ void upload_Task(void *arg)
 
                 mqtt_upload_chunk_t data_chunk = {.len = msg.len};
                 memcpy(data_chunk.data, msg.data, msg.len);
-                mqtt_upload_write(data_chunk);
+                // mqtt_upload_write(data_chunk);
+                udp_upload_write(msg.data, msg.len);
 
                 total_bytes += msg.len;
 
@@ -402,7 +402,7 @@ void upload_Task(void *arg)
                 if (now - last_time > 1000000)
                 { // 每秒输出一次
                     float rate = (float)(total_bytes - last_bytes) / ((now - last_time) / 1000000.0f);
-                    ESP_LOGI("RATE", "MQTT消费速率: %.2f KB/s", rate / 1024.0f);
+                    ESP_LOGI("RATE", "消费速率: %.2f KB/s", rate / 1024.0f);
                     last_time = now;
                     last_bytes = total_bytes;
                 }
@@ -410,8 +410,8 @@ void upload_Task(void *arg)
 
             case UPLOAD_MSG_STOP:
                 ESP_LOGI(TAG, "UPLOAD_MSG_STOP");
-                mqtt_upload_chunk_t empty_chunk = {.len = 0};
-                mqtt_upload_write(empty_chunk);
+                // mqtt_upload_chunk_t empty_chunk = {.len = 0};
+                // mqtt_upload_write(empty_chunk);
                 // vRingbufferDelete(pcm_ring);
                 // pcm_ring = xRingbufferCreate(PCM_RING_CAPACITY, RINGBUF_TYPE_NOSPLIT);
                 break;

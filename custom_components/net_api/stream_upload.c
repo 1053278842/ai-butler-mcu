@@ -157,3 +157,16 @@ void stream_upload_write(esp_http_client_handle_t *client, char *data, size_t le
     memcpy(tx_buf + tx_len, data, len);
     tx_len += len;
 }
+
+void udp_upload_write(const void *data, size_t len)
+{
+    udp_mgr_t udp_mgr = udp_mgr_get();
+    if (!udp_mgr.ready)
+    {
+        udp_mgr_init("121.36.251.16", 6543);
+        // udp_mgr_init("192.168.88.250", 6543);
+        udp_mgr = udp_mgr_get();
+    }
+
+    udp_mgr_send(data, len);
+}
