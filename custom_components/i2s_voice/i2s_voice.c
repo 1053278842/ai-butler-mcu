@@ -8,10 +8,17 @@
 #define TAG "AUDIO_PLAYER"
 
 #define SAMPLE_RATE 16000
+#define PCM_RING_CAPACITY (64 * 1024)
+#define PCM_QUEUE_SIZE 32
 
 static i2s_chan_handle_t spk_chan = NULL; // 使用新的 I2S 通道句柄
 static i2s_chan_handle_t mic_chan = NULL; // 使用新的 I2S 通道句柄fv
-QueueHandle_t frame_queue;
+static QueueHandle_t ctrl_queue;
+static RingbufHandle_t pcm_ring;
+bool need_record = false;
+
+bool rateLimiting = false;
+static float delay_factor = 1.0f;
 // vad
 
 void i2s_spk_init(uint32_t sample_rate, uint16_t bits, uint16_t channels)
@@ -118,10 +125,11 @@ vad_ctx_t *init_vad_mod()
 {
     srmodel_list_t *models = esp_srmodel_init("model");
     afe_config_t *afe_config = afe_config_init("M", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
-    afe_config->vad_min_noise_ms = 800;  // The minimum duration of noise or silence in ms.
-    afe_config->vad_min_speech_ms = 512; // The minimum duration of speech in ms.
+    afe_config->vad_min_noise_ms = 1000; // The minimum duration of noise or silence in ms.
+    afe_config->vad_min_speech_ms = 600; // The minimum duration of speech in ms.
     afe_config->vad_mode = VAD_MODE_0;   // 这傻逼玩意，别信他的注释（“So If you want trigger more speech, please select lower mode.”）。明明是越大越灵敏
     afe_config->agc_mode = 2;            // 启用更强的自动增益控制（AGC）
+    afe_config->afe_linear_gain = 3;     // 较高增益
 
     // 噪声抑制
     char *ns_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
@@ -152,6 +160,7 @@ void feed_Task(void *arg)
     esp_afe_sr_iface_t *afe_handle = vad->handle;
     int audio_chunksize = afe_handle->get_feed_chunksize(afe_data);
     int nch = afe_handle->get_feed_channel_num(afe_data);
+    int delay_ms = (1000 * audio_chunksize) / SAMPLE_RATE;
 
     int16_t *i2s_buff = malloc(audio_chunksize * sizeof(int16_t) * nch);                // 512 * 2 = 1024bytes ,512个元素
     uint8_t *r_buf = (uint8_t *)calloc(1, audio_chunksize * sizeof(int16_t) * nch * 2); // 2028bytes,512个元素，每个元素32-16bits
@@ -173,6 +182,9 @@ void feed_Task(void *arg)
         }
         chunks = 0;
         afe_handle->feed(afe_data, i2s_buff);
+
+        // int curr_delay_ms =;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms * delay_factor)); // 增加延迟，因为一次样本=512个，采样率16kHz，512/16000=0.032s
     }
     if (i2s_buff)
     {
@@ -182,15 +194,22 @@ void feed_Task(void *arg)
     vTaskDelete(NULL);
 }
 
+static int frame_count = 0;
 void detect_Task(void *arg)
 {
     vad_ctx_t *vad = (vad_ctx_t *)arg;
     esp_afe_sr_data_t *afe_data = vad->data;
     esp_afe_sr_iface_t *afe_handle = vad->handle;
 
-    int afe_chunksize = afe_handle->get_fetch_chunksize(afe_data);
-    int8_t *up_buff = malloc(afe_chunksize * sizeof(int16_t) + 32);
+    int audio_chunksize = afe_handle->get_feed_chunksize(afe_data);
+    int nch = afe_handle->get_feed_channel_num(afe_data);
+    int delay_ms = (1000 * audio_chunksize) / SAMPLE_RATE;
+
     stream_upload_ctx_t ctx = {0};
+    int total_ms = 0; // 统计时长
+
+    static uint32_t last_addr = 0;
+    static int64_t last_time = 0;
 
     while (1)
     {
@@ -198,64 +217,6 @@ void detect_Task(void *arg)
         if (!res || res->ret_value == ESP_FAIL)
         {
             printf("fetch error!\n");
-            break;
-        }
-
-        if (res->vad_state == VAD_SPEECH)
-        {
-            ESP_LOGI(TAG, "检测到人声");
-            if (!ctx.uploading)
-            {
-                ESP_LOGI(TAG, "检测到人声，开始流式上传...");
-                ctx.uploading = true;
-                ctx.silence_ms = 0;
-                upload_msg_t msg = {.type = UPLOAD_MSG_START};
-                xQueueSend(frame_queue, &msg, 0);
-
-                // stream_upload_start(&ctx, afe_chunksize);
-            }
-            ctx.silence_ms = 0;
-        }
-        else
-        {
-            if (ctx.uploading)
-            {
-                ctx.silence_ms += 32;
-                if (ctx.silence_ms > 2000)
-                {
-                    ESP_LOGI(TAG, "检测到静音，结束流式上传");
-                    // stream_upload_stop(&ctx);
-                    ctx.uploading = false;
-                    ctx.silence_ms = 0;
-                    upload_msg_t msg = {.type = UPLOAD_MSG_STOP};
-                    xQueueSend(frame_queue, &msg, 0);
-                }
-            }
-        }
-
-        if (ctx.uploading)
-        {
-            size_t payload_len = res->data_size;
-            if (payload_len > 0)
-            {
-
-                char chunk_header[16];
-                snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", (unsigned int)payload_len);
-                size_t header_len = strlen(chunk_header);
-
-                // ESP_LOGI(TAG, "chunk_header:%s,chunk_size:%zu", chunk_header, header_len);
-                memcpy(up_buff, chunk_header, header_len);
-
-                // ESP_LOGI(TAG, "buff:%s,buff_size:%zu", up_buff, payload_len + 32);
-                memcpy(up_buff + header_len, res->data, payload_len);
-                memcpy(up_buff + header_len + payload_len, "\r\n", 2);
-
-                size_t total_len = header_len + payload_len + 2; // "\r\n" = 2 bytes
-
-                upload_msg_t msg = {.type = UPLOAD_MSG_DATA, .len = total_len};
-                memcpy(msg.data, up_buff, msg.len);
-                xQueueSend(frame_queue, &msg, 0);
-            }
         }
 
         if (res->wakeup_state == WAKENET_DETECTED)
@@ -263,6 +224,145 @@ void detect_Task(void *arg)
             ESP_LOGI(TAG, "触发唤醒词！");
             // printf("model index:%d, word index:%d\n", res->wakenet_model_index, res->wake_word_index);
             ESP_LOGI(TAG, "唤醒词模型索引:%d, 唤醒词索引:%d", res->wakenet_model_index, res->wake_word_index);
+            need_record = true;
+        }
+
+        ctx.uploading = true;
+        if (res->vad_state == VAD_SPEECH)
+        {
+            // frame_count++;
+            // if (frame_count % 100 == 0)
+            // {
+            //     ESP_LOGI(TAG, "检测到人声");
+            // }
+            if (!ctx.uploading)
+            {
+                ESP_LOGI(TAG, "检测到人声，开始流式上传...");
+                ctx.uploading = true;
+                ctx.silence_ms = 0;
+                total_ms = 0;
+                upload_msg_t msg = {.type = UPLOAD_MSG_START};
+                msg.pcm_header_flag = (pcm_flag_t){.signFlag = 1, .needSave = 0, .needStt = 1, .isWake = need_record ? 1 : 0, .reserved = 0};
+                // mqtt_upload_chunk_t chunk_data = {.data = msg.data, .len = msg.len};
+                if (xQueueSend(ctrl_queue, &msg, pdMS_TO_TICKS(10)) != pdPASS)
+                {
+
+                    ESP_LOGW(TAG, "队列已满，丢弃消息 type=%d", msg.type);
+                    upload_msg_t dropped;
+                    if (xQueueReceive(ctrl_queue, &dropped, 0) == pdPASS)
+                    {
+                        ESP_LOGW(TAG, "队列已满，丢弃旧消息");
+                    }
+                    if (xQueueSend(ctrl_queue, &msg, 0) != pdPASS)
+                    {
+                        ESP_LOGE(TAG, "仍无法插入最新消息 type=%d", msg.type);
+                    }
+                }
+            }
+            ctx.silence_ms = 0;
+        }
+        else
+        {
+            if (ctx.uploading)
+            {
+                // ctx.silence_ms += 32; // 采样点/采样率*1000=ms
+                if (ctx.silence_ms > 2000)
+                {
+                    ESP_LOGI(TAG, "检测到静音，结束流式上传");
+                    continue;
+                    if (total_ms - ctx.silence_ms < 1000)
+                    {
+                        ESP_LOGI(TAG, "本次录音时间{%d}过短，不建议保存!", total_ms - ctx.silence_ms);
+                    }
+
+                    ctx.uploading = false;
+                    total_ms = 0;
+                    ctx.silence_ms = 0;
+                    need_record = false;
+
+                    upload_msg_t msg = {.type = UPLOAD_MSG_STOP};
+                    while (xQueueSend(ctrl_queue, &msg, 0) != pdPASS)
+                    {
+                        upload_msg_t dropped;
+                        if (xQueueReceive(ctrl_queue, &dropped, 0) == pdPASS)
+                        {
+                            ESP_LOGW(TAG, "STOP 抢占队列，丢弃旧消息 type=%d", dropped.type);
+                        }
+                        else
+                        {
+                            // 理论上不会发生；防止死循环
+                            vTaskDelay(pdMS_TO_TICKS(1));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (ctx.uploading)
+        {
+            total_ms += 32;
+            size_t payload_len = res->data_size;
+            if (payload_len > 0)
+            {
+                static bool warned = false;
+                // res->data_szie = 帧采样数512 * 16位深 = 1024字节
+                upload_msg_t msg = {.type = UPLOAD_MSG_DATA, .len = res->data_size};
+                memcpy(msg.data, res->data, res->data_size);
+
+                int free_slots = uxQueueSpacesAvailable(ctrl_queue);
+                float usage = 1.0f - ((float)free_slots / PCM_QUEUE_SIZE);
+                delay_factor = 0.0f + (usage * 3.0f);
+                // ESP_LOGW("QUEUE", "队列高水位(剩余=%d),水位：%f ,延迟倍率：%fms",
+                //          free_slots, usage, 32 * delay_factor);
+                // ESP_LOGI("QUEUE", "队列恢复正常 (剩余=%d)", free_slots);
+                if (usage >= 0.6f)
+                {
+                    // 队列几乎满了，启用限流
+                    rateLimiting = true;
+                    ESP_LOGW("QUEUE", "队列高水位(剩余=%d),水位：%f ,延迟倍率：%fms",
+                             free_slots, usage, 32 * delay_factor);
+                }
+                else
+                {
+                    if (rateLimiting)
+                    {
+                        ESP_LOGI("QUEUE", "队列恢复正常 (剩余=%d),水位：%f ,延迟倍率：%fms", free_slots, usage, 32 * delay_factor);
+                    }
+                    rateLimiting = false;
+                }
+
+                if (xQueueSend(ctrl_queue, &msg, pdMS_TO_TICKS(10)) != pdPASS)
+                {
+                    ESP_LOGW(TAG, "队列已满，丢弃消息 type=%d", msg.type);
+                    upload_msg_t dropped;
+                    if (xQueueReceive(ctrl_queue, &dropped, 0) == pdPASS)
+                    {
+                        ESP_LOGW(TAG, "队列已满，丢弃旧消息");
+                    }
+                    if (xQueueSend(ctrl_queue, &msg, 0) != pdPASS)
+                    {
+                        ESP_LOGE(TAG, "仍无法插入最新消息 type=%d", msg.type);
+                    }
+                }
+
+                // size_t free_bytes = xRingbufferGetCurFreeSize(pcm_ring);
+                // size_t used_bytes = PCM_RING_CAPACITY - free_bytes;
+                // if (used_bytes > (PCM_RING_CAPACITY * 3) / 4)
+                // {
+                //     ESP_LOGW(TAG, "环形缓冲区高水位:%u/%u", (unsigned int)used_bytes, (unsigned int)PCM_RING_CAPACITY);
+                // }
+                // if (xRingbufferSend(pcm_ring, res->data, res->data_size, pdMS_TO_TICKS(20)) != pdPASS)
+                // {
+                //     ESP_LOGW(TAG, "环形缓冲区已满!DATA指令丢失");
+                // }
+
+                // upload_msg_t msg = {.type = UPLOAD_MSG_DATA, .len = res->data_size};
+                // memcpy(msg.data, res->data, res->data_size);
+                // if (xQueueSend(ctrl_queue, &msg, 0) != pdPASS)
+                // {
+                //     ESP_LOGI(TAG, "队列已满，丢弃消息 type=%d", msg.type);
+                // }
+            }
         }
     }
 
@@ -272,27 +372,70 @@ void detect_Task(void *arg)
 void upload_Task(void *arg)
 {
     upload_msg_t msg;
-    esp_http_client_handle_t client = NULL;
+
+    static int64_t last_time = 0;
+    static size_t last_bytes = 0;
+    size_t total_bytes = 0;
+    int64_t start_time = esp_timer_get_time(); // μs
 
     while (1)
     {
-        if (xQueueReceive(frame_queue, &msg, portMAX_DELAY) == pdPASS)
+        bool handled = false;
+        if (xQueueReceive(ctrl_queue, &msg, pdMS_TO_TICKS(10)) == pdPASS)
         {
             switch (msg.type)
             {
             case UPLOAD_MSG_START:
-                stream_upload_start(&client);
+                ESP_LOGI(TAG, "UPLOAD_MSG_START");
                 break;
 
             case UPLOAD_MSG_DATA:
-                stream_upload_write(&client, (char *)msg.data, msg.len);
+                // mqtt_upload_chunk_t data_chunk = {.len = 0, .data = {0}};
+
+                mqtt_upload_chunk_t data_chunk = {.len = msg.len};
+                memcpy(data_chunk.data, msg.data, msg.len);
+                mqtt_upload_write(data_chunk);
+
+                total_bytes += msg.len;
+
+                int64_t now = esp_timer_get_time();
+                if (now - last_time > 1000000)
+                { // 每秒输出一次
+                    float rate = (float)(total_bytes - last_bytes) / ((now - last_time) / 1000000.0f);
+                    ESP_LOGI("RATE", "MQTT消费速率: %.2f KB/s", rate / 1024.0f);
+                    last_time = now;
+                    last_bytes = total_bytes;
+                }
                 break;
 
             case UPLOAD_MSG_STOP:
-                stream_upload_stop(&client);
+                ESP_LOGI(TAG, "UPLOAD_MSG_STOP");
+                mqtt_upload_chunk_t empty_chunk = {.len = 0};
+                mqtt_upload_write(empty_chunk);
+                // vRingbufferDelete(pcm_ring);
+                // pcm_ring = xRingbufferCreate(PCM_RING_CAPACITY, RINGBUF_TYPE_NOSPLIT);
                 break;
             }
+            handled = true;
         }
+
+        // uint8_t *item;
+        // size_t item_len;
+        // while ((item = xRingbufferReceive(pcm_ring, &item_len, 0)) != NULL)
+        // {
+        //     mqtt_upload_chunk_t data_chunk = {.len = item_len};
+        //     memcpy(data_chunk.data, item, item_len);
+        //     mqtt_upload_write(data_chunk);
+        //     // ESP_LOGI(TAG, "item_len:%d", item_len);
+        //     // stream_upload_write(&client, (char *)item, item_len);
+        //     vRingbufferReturnItem(pcm_ring, item);
+        //     handled = true;
+        // }
+
+        // if (!handled)
+        // {
+        //     vTaskDelay(pdMS_TO_TICKS(5));
+        // }
     }
 }
 
@@ -300,11 +443,12 @@ void wwd_task()
 {
     i2s_mic_init();
     vad_ctx_t *vad = init_vad_mod();
-    frame_queue = xQueueCreate(8, sizeof(upload_msg_t));
-    xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void *)vad, 5, NULL, 0);
-    xTaskCreatePinnedToCore(&detect_Task, "detect", 8 * 1024, (void *)vad, 5, NULL, 1);
-
-    xTaskCreatePinnedToCore(&upload_Task, "upload", 8 * 1024, NULL, 5, NULL, 0);
+    ctrl_queue = xQueueCreate(PCM_QUEUE_SIZE, sizeof(upload_msg_t)); // 控制队列
+    // pcm_ring = xRingbufferCreate(PCM_RING_CAPACITY, RINGBUF_TYPE_NOSPLIT); // 数据队列 NOSPLIT， send多少字节receive多少字节
+    assert(ctrl_queue);
+    xTaskCreate(&upload_Task, "upload", 8 * 1024, NULL, 7, NULL);
+    xTaskCreate(&feed_Task, "feed", 8 * 1024, (void *)vad, 5, NULL);
+    xTaskCreate(&detect_Task, "detect", 8 * 1024, (void *)vad, 5, NULL);
 }
 
 // 或者在切换前完全关闭扬声器

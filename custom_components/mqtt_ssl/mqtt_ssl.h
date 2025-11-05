@@ -31,4 +31,5 @@
 void start_mqtt_ssl(void);
 void stop_mqtt_ssl(void);
 
+esp_mqtt_client_handle_t esp_mqtt_client_get_global_handle(void);
 #endif

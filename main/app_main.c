@@ -45,6 +45,7 @@ static void event_handler(void *handler_arg,
             ESP_LOGI(TAG, "开启 MQTT 任务");
             start_mqtt_ssl(); // 启动 MQTT 任务
 
+            esp_wifi_set_ps(WIFI_PS_NONE); // 关闭省电，提升性能
             wwd_task();
             break;
 

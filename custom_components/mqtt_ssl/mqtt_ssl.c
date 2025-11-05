@@ -9,6 +9,11 @@ static esp_mqtt_client_handle_t g_mqtt_client = NULL;
 
 typedef void (*topic_handler_t)(const char *payload);
 
+esp_mqtt_client_handle_t esp_mqtt_client_get_global_handle()
+{
+    return g_mqtt_client;
+}
+
 void stream_task(void *arg)
 {
     const char *url = (const char *)arg;
@@ -24,6 +29,7 @@ void stream_task(void *arg)
     esp_http_client_perform(client);
     esp_http_client_cleanup(client);
 
+    free((void *)url);
     vTaskDelete(NULL);
 }
 
@@ -42,7 +48,9 @@ void handle_player(const char *payload)
     {
         ESP_LOGI(MQTT_SSL_TAG, "开始播放 URL: %s", url_json->valuestring);
         // 用独立任务播放，避免阻塞 MQTT
-        // xTaskCreate(stream_task, "audio_stream_task", 8192, (void *)url_json->valuestring, 5, NULL);
+        char *url_copy = strdup(url_json->valuestring);
+
+        // xTaskCreate(stream_task, "audio_stream_task", 8192, (void *)url_copy, 5, NULL);
     }
 
     // 释放内存
@@ -116,7 +124,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(MQTT_SSL_TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_PUBLISHED:
-        ESP_LOGI(MQTT_SSL_TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        // ESP_LOGI(MQTT_SSL_TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(MQTT_SSL_TAG, "MQTT_EVENT_DATA");
@@ -197,6 +205,7 @@ void start_mqtt_ssl(void)
         .session.last_will = {.topic = "ll/washroom/light/light001/up/online", .msg = "{ \"online\": false }", .msg_len = 0, .qos = 1, .retain = 1}};
     ESP_LOGI(MQTT_SSL_TAG, "[APP] Free memory: %" PRIu32 " bytes", esp_get_free_heap_size());
     g_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+
     /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
     esp_mqtt_client_register_event(g_mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(g_mqtt_client);

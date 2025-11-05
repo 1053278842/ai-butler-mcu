@@ -6,6 +6,7 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/ringbuf.h"
 #include <string.h>
 #include <stdint.h>
 #include "esp_wn_iface.h"
@@ -19,7 +20,6 @@
 #include "esp_afe_sr_models.h"
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
-
 #include "stream_upload.h"
 // #include "esp_board_init.h"
 
@@ -37,6 +37,7 @@ typedef struct
     esp_afe_sr_iface_t *handle;
     esp_afe_sr_data_t *data;
 } vad_ctx_t;
+
 typedef enum
 {
     UPLOAD_MSG_START,
@@ -44,11 +45,23 @@ typedef enum
     UPLOAD_MSG_DATA,
 } upload_msg_type_t;
 
+// 位域结构体：用于存布尔标志
+typedef struct
+{
+    uint8_t signFlag : 1; // 录音标志
+    uint8_t needSave : 1; // 是否需要保存
+    uint8_t needStt : 1;  // 是否需要语音识别
+    uint8_t isWake : 1;   // 是否唤醒状态
+    uint8_t reserved : 4; // 保留位（补齐 8bit）初始化为0即可
+} pcm_flag_t;
+
+// pcm 数据上传结构体
 typedef struct
 {
     upload_msg_type_t type;
     size_t len;
-    uint8_t data[2048]; // or pointer
+    uint8_t data[1024]; // or pointer
+    pcm_flag_t pcm_header_flag;
 } upload_msg_t;
 
 typedef struct

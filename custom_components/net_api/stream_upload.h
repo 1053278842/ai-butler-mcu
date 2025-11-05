@@ -9,9 +9,17 @@
 #include "esp_http_client.h"
 #include "esp_event.h"
 #include <esp_log.h>
+#include "mqtt_ssl.h"
+
+typedef struct
+{
+    uint8_t data[1024];
+    size_t len;
+} mqtt_upload_chunk_t;
 
 void stream_upload_start(esp_http_client_handle_t *client);
 void stream_upload_stop(esp_http_client_handle_t *client);
 void stream_upload_write(esp_http_client_handle_t *client, char *data, size_t len);
 
+void mqtt_upload_write(mqtt_upload_chunk_t data);
 #endif
